@@ -1,0 +1,15 @@
+# LLM API configuration.
+# Copy this file to "config.properties" and fill in your real API key.
+# config.properties is listed in .gitignore and must NOT be committed.
+
+# OpenAI-compatible API base URL (OpenRouter by default; use https://api.openai.com/v1 for OpenAI)
+llm.api.base-url=https://openrouter.ai/api/v1
+
+# Your API key (keep it secret!)
+llm.api.key=sk-your-api-key-here
+
+# Model name supported by the provider
+llm.model=openai/gpt-4o-mini
+
+# Local web server port
+server.port=8080

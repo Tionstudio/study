@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Chat</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+            background: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 24px;
+        }
+        .container {
+            width: 100%;
+            max-width: 720px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        h1 { font-size: 20px; color: #1a1a1a; }
+        #chat {
+            flex: 1;
+            min-height: 320px;
+            max-height: 60vh;
+            overflow-y: auto;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .msg {
+            max-width: 85%;
+            padding: 10px 14px;
+            border-radius: 12px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            line-height: 1.45;
+            font-size: 14px;
+        }
+        .msg.user {
+            align-self: flex-end;
+            background: #2563eb;
+            color: #fff;
+        }
+        .msg.assistant {
+            align-self: flex-start;
+            background: #e5e7eb;
+            color: #1a1a1a;
+        }
+        .msg.error {
+            align-self: flex-start;
+            background: #fee2e2;
+            color: #991b1b;
+        }
+        .msg.pending { opacity: 0.6; font-style: italic; }
+        .input-row {
+            display: flex;
+            gap: 8px;
+        }
+        #input {
+            flex: 1;
+            padding: 12px 14px;
+            border: 1px solid #ccc;
+            border-radius: 10px;
+            font-size: 14px;
+            font-family: inherit;
+            resize: none;
+        }
+        #input:focus { outline: 2px solid #2563eb; border-color: transparent; }
+        #send {
+            padding: 12px 22px;
+            border: none;
+            border-radius: 10px;
+            background: #2563eb;
+            color: #fff;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        #send:disabled { background: #9ca3af; cursor: default; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>LLM Chat</h1>
+    <div id="chat"></div>
+    <div class="input-row">
+        <textarea id="input" rows="2" placeholder="Type your request… (Enter to send, Shift+Enter for new line)"></textarea>
+        <button id="send">Send</button>
+    </div>
+</div>
+
+<script>
+    const chatEl = document.getElementById('chat');
+    const inputEl = document.getElementById('input');
+    const sendBtn = document.getElementById('send');
+
+    function addMessage(text, role) {
+        const div = document.createElement('div');
+        div.className = 'msg ' + role;
+        div.textContent = text;
+        chatEl.appendChild(div);
+        chatEl.scrollTop = chatEl.scrollHeight;
+        return div;
+    }
+
+    async function sendMessage() {
+        const text = inputEl.value.trim();
+        if (!text) return;
+
+        inputEl.value = '';
+        sendBtn.disabled = true;
+        addMessage(text, 'user');
+        const pending = addMessage('Thinking…', 'assistant pending');
+
+        try {
+            const resp = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: text })
+            });
+            const data = await resp.json();
+            pending.remove();
+            if (resp.ok && data.reply !== undefined) {
+                addMessage(data.reply, 'assistant');
+            } else {
+                addMessage(data.error || ('HTTP ' + resp.status), 'error');
+            }
+        } catch (e) {
+            pending.remove();
+            addMessage('Network error: ' + e.message, 'error');
+        } finally {
+            sendBtn.disabled = false;
+            inputEl.focus();
+        }
+    }
+
+    sendBtn.addEventListener('click', sendMessage);
+    inputEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
+    inputEl.focus();
+</script>
+</body>
+</html>

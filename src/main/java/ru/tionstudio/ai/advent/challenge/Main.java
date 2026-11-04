@@ -1,13 +1,19 @@
 package ru.tionstudio.ai.advent.challenge;
 
-//TIP To <b>Run</b> code, press <shortcut actionId="Run"/> or
-// click the <icon src="AllIcons.Actions.Execute"/> icon in the gutter.
+import ru.tionstudio.ai.advent.challenge.config.AppConfig;
+import ru.tionstudio.ai.advent.challenge.llm.LlmClient;
+import ru.tionstudio.ai.advent.challenge.server.ChatServer;
+
 public class Main {
     public static void main(String[] args) {
-        //TIP Press <shortcut actionId="ShowIntentionActions"/> with your caret at the highlighted text
-        // to see how OpenIDE suggests fixing it.
-        System.out.printf("Hello and welcome!");
-
-
+        try {
+            AppConfig config = AppConfig.load();
+            LlmClient llmClient = new LlmClient(config);
+            ChatServer server = new ChatServer(config.serverPort(), llmClient);
+            server.start();
+        } catch (Exception e) {
+            System.err.println("Failed to start: " + e.getMessage());
+            System.exit(1);
+        }
     }
 }
