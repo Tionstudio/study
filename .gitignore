@@ -40,3 +40,9 @@ build/
 
 ### Secrets / local config ###
 config.properties
+
+### Local database ###
+settings.db
+settings.db-journal
+settings.db-wal
+settings.db-shm

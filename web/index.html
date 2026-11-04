@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -16,16 +16,152 @@
         }
         .container {
             width: 100%;
-            max-width: 720px;
+            max-width: 1400px;
+            height: calc(100vh - 48px);
             display: flex;
             flex-direction: column;
             gap: 12px;
         }
         h1 { font-size: 20px; color: #1a1a1a; }
+
+        /* ---------- Two-column layout: chat left, settings right ---------- */
+        .layout {
+            flex: 1;
+            min-height: 0;
+            display: flex;
+            gap: 16px;
+            align-items: stretch;
+        }
+        .chat-column {
+            flex: 1;
+            min-width: 0;
+            min-height: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        /* ---------- Settings frame ---------- */
+        .settings {
+            width: 380px;
+            flex-shrink: 0;
+            position: sticky;
+            top: 24px;
+            max-height: calc(100vh - 48px);
+            overflow-y: auto;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+        }
+        .settings-title {
+            padding: 12px 16px;
+            font-size: 14px;
+            font-weight: 600;
+            color: #1a1a1a;
+            border-bottom: 1px solid #eee;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .settings-title .title-buttons {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .title-buttons button {
+            padding: 4px 10px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            background: #fff;
+            color: #374151;
+            font-size: 12px;
+            font-weight: 400;
+            cursor: pointer;
+        }
+        .title-buttons button:hover { background: #f3f4f6; }
+        #saveSettings {
+            background: #2563eb;
+            border-color: #2563eb;
+            color: #fff;
+        }
+        #saveSettings:hover { background: #1d4ed8; }
+        .preset-row { display: flex; flex-direction: column; gap: 4px; }
+        #presetSelect {
+            width: 100%;
+            padding: 8px 10px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 13px;
+            font-family: inherit;
+            background: #fff;
+        }
+        .settings-status {
+            font-size: 12px;
+            color: #16a34a;
+            min-height: 15px;
+        }
+        .settings-status.error { color: #991b1b; }
+        .settings-body {
+            padding: 12px 16px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+        @media (max-width: 900px) {
+            .container { height: auto; min-height: calc(100vh - 48px); }
+            .layout { flex-direction: column; }
+            .chat-column { min-height: 0; }
+            #chat { min-height: 300px; max-height: 60vh; }
+            .settings { width: 100%; position: static; max-height: none; }
+        }
+        fieldset {
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            padding: 10px 14px 12px;
+        }
+        legend {
+            font-size: 13px;
+            font-weight: 600;
+            color: #374151;
+            padding: 0 6px;
+        }
+        .option {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            padding: 4px 0;
+            font-size: 14px;
+            color: #1f2937;
+        }
+        .option input[type="radio"] { margin-top: 3px; }
+        .option .sub {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .option input[type="text"],
+        .option input[type="number"] {
+            width: 100%;
+            max-width: 360px;
+            padding: 6px 10px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 13px;
+            font-family: inherit;
+        }
+        .option input[type="number"] { max-width: 140px; }
+        .option input:focus { outline: 2px solid #2563eb; border-color: transparent; }
+        .sub-field { display: none; }
+        .sub-field.visible { display: flex; flex-direction: column; gap: 4px; }
+        .hint { font-size: 12px; color: #6b7280; }
+
+        /* ---------- Chat ---------- */
         #chat {
             flex: 1;
-            min-height: 320px;
-            max-height: 60vh;
+            min-height: 0;
             overflow-y: auto;
             background: #fff;
             border: 1px solid #ddd;
@@ -44,26 +180,61 @@
             line-height: 1.45;
             font-size: 14px;
         }
-        .msg.user {
-            align-self: flex-end;
-            background: #2563eb;
-            color: #fff;
-        }
-        .msg.assistant {
+        .msg.user { align-self: flex-end; background: #2563eb; color: #fff; }
+        .msg.assistant { align-self: flex-start; background: #e5e7eb; color: #1a1a1a; }
+        .msg.error { align-self: flex-start; background: #fee2e2; color: #991b1b; }
+        .reasoning {
             align-self: flex-start;
-            background: #e5e7eb;
-            color: #1a1a1a;
+            max-width: 85%;
+            background: #f3f4f6;
+            border: 1px solid #e5e7eb;
+            border-radius: 12px;
+            padding: 8px 12px;
+            font-size: 12px;
+            color: #6b7280;
         }
-        .msg.error {
+        .reasoning summary {
+            cursor: pointer;
+            font-weight: 500;
+            user-select: none;
+            list-style: none;
+        }
+        .reasoning summary::before { content: "▸ "; }
+        .reasoning[open] summary::before { content: "▾ "; }
+        .reasoning .reasoning-body {
+            margin-top: 6px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-style: italic;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .msg.parsed {
             align-self: flex-start;
-            background: #fee2e2;
-            color: #991b1b;
+            background: #f0fdf4;
+            color: #166534;
+            border: 1px solid #bbf7d0;
+            font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+            font-size: 13px;
         }
         .msg.pending { opacity: 0.6; font-style: italic; }
-        .input-row {
-            display: flex;
-            gap: 8px;
+        .msg .meta {
+            margin-top: 6px;
+            font-size: 11px;
+            color: #6b7280;
+            border-top: 1px solid rgba(0,0,0,0.08);
+            padding-top: 4px;
         }
+        .msg .meta.top {
+            margin-top: 0;
+            margin-bottom: 6px;
+            border-top: none;
+            border-bottom: 1px solid rgba(0,0,0,0.08);
+            padding-top: 0;
+            padding-bottom: 4px;
+            font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        }
+        .input-row { display: flex; gap: 8px; }
         #input {
             flex: 1;
             padding: 12px 14px;
@@ -84,15 +255,190 @@
             cursor: pointer;
         }
         #send:disabled { background: #9ca3af; cursor: default; }
+
+        /* ---------- Context menu ---------- */
+        .context-menu {
+            position: absolute;
+            display: none;
+            background: #fff;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+            z-index: 100;
+            overflow: hidden;
+        }
+        .context-menu.visible { display: block; }
+        .context-menu button {
+            display: block;
+            width: 100%;
+            padding: 10px 16px;
+            border: none;
+            background: none;
+            font-size: 13px;
+            color: #1f2937;
+            text-align: left;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .context-menu button:hover { background: #f3f4f6; }
     </style>
 </head>
 <body>
 <div class="container">
     <h1>LLM Chat</h1>
-    <div id="chat"></div>
-    <div class="input-row">
-        <textarea id="input" rows="2" placeholder="Type your request… (Enter to send, Shift+Enter for new line)"></textarea>
-        <button id="send">Send</button>
+
+    <div class="layout">
+        <div class="chat-column">
+            <div id="chat"></div>
+            <div class="input-row">
+                <textarea id="input" rows="2" placeholder="Введите запрос… (Enter — отправить, Shift+Enter — новая строка)"></textarea>
+                <button id="send">Отправить</button>
+            </div>
+        </div>
+
+        <aside class="settings">
+            <div class="settings-title">
+                Настройки
+                <span class="title-buttons">
+                    <button id="saveSettings" type="button" title="Сохранить текущие настройки с названием">Сохранить</button>
+                    <button id="resetSettings" type="button" title="Вернуть значения по умолчанию">Сбросить</button>
+                    <button id="deletePreset" type="button" title="Удалить набор, выбранный в списке ниже">Удалить</button>
+                </span>
+            </div>
+            <div class="settings-body">
+                <div class="preset-row">
+                    <select id="presetSelect">
+                        <option value="">Сохранённые настройки…</option>
+                    </select>
+                    <div id="settingsStatus" class="settings-status"></div>
+                </div>
+            <fieldset>
+                <legend>Формат ответа</legend>
+                <label class="option">
+                    <input type="radio" name="format" value="none" checked>
+                    <span>Без формата (обычный ответ)</span>
+                </label>
+                <label class="option">
+                    <input type="radio" name="format" value="json">
+                    <span class="sub">
+                        JSON
+                        <span class="sub-field" data-for="json">
+                            <input type="text" id="formatDescJson" placeholder="Описание формата (опционально), напр.: {&quot;name&quot;: string, &quot;age&quot;: number}">
+                            <span class="hint">Опишите ожидаемую структуру JSON — она будет добавлена в системный промпт.</span>
+                        </span>
+                    </span>
+                </label>
+                <label class="option">
+                    <input type="radio" name="format" value="xml">
+                    <span class="sub">
+                        XML
+                        <span class="sub-field" data-for="xml">
+                            <input type="text" id="formatDescXml" placeholder="Описание формата (опционально), напр.: &lt;answer&gt;&lt;item&gt;...&lt;/item&gt;&lt;/answer&gt;">
+                            <span class="hint">Опишите ожидаемую структуру XML — она будет добавлена в системный промпт.</span>
+                        </span>
+                    </span>
+                </label>
+                <label class="option">
+                    <input type="radio" name="format" value="yaml">
+                    <span>YAML</span>
+                </label>
+                <label class="option">
+                    <input type="radio" name="format" value="markdown-table">
+                    <span>Markdown-таблица</span>
+                </label>
+                <label class="option">
+                    <input type="radio" name="format" value="chain-of-thought">
+                    <span>Chain-of-Thought (пошаговые рассуждения)</span>
+                </label>
+                <label class="option">
+                    <input type="radio" name="format" value="styled">
+                    <span class="sub">
+                        Стилизованный текст
+                        <span class="sub-field" data-for="styled">
+                            <input type="text" id="formatDescStyled" placeholder="Стиль ответа, напр.: сказка на ночь, отчёт системного аналитика, объяснение для пятилетнего">
+                            <span class="hint">Опишите желаемый стиль — он будет добавлен в системный промпт. Если оставить пустым, используется стиль системного аналитика.</span>
+                        </span>
+                    </span>
+                </label>
+            </fieldset>
+
+            <fieldset>
+                <legend>Stop sequence</legend>
+                <label class="option">
+                    <input type="radio" name="stopMode" value="natural" checked>
+                    <span>Естественная остановка</span>
+                </label>
+                <label class="option">
+                    <input type="radio" name="stopMode" value="max_tokens">
+                    <span class="sub">
+                        max_tokens
+                        <span class="sub-field" data-for-stop="max_tokens">
+                            <input type="number" id="maxTokens" min="1" max="32000" value="500">
+                            <span class="hint">Максимальное количество токенов в ответе.</span>
+                        </span>
+                    </span>
+                </label>
+                <label class="option">
+                    <input type="radio" name="stopMode" value="sequences">
+                    <span class="sub">
+                        Последовательность остановки
+                        <span class="sub-field" data-for-stop="sequences">
+                            <input type="text" id="stopSequences" placeholder="Например: END, ###, ===">
+                            <span class="hint">Последовательности через запятую — генерация остановится на первой из них.</span>
+                        </span>
+                    </span>
+                </label>
+            </fieldset>
+
+            <fieldset>
+                <legend>Парсинг ответа</legend>
+                <label class="option">
+                    <input type="radio" name="parseMode" value="none" checked>
+                    <span>Без парсинга</span>
+                </label>
+                <label class="option">
+                    <input type="radio" name="parseMode" value="jsonpath">
+                    <span class="sub">
+                        JSONPath
+                        <span class="sub-field" data-for-parse="jsonpath">
+                            <input type="text" id="parseExprJsonPath" placeholder="Например: $.items[0].name">
+                            <span class="hint">Выражение JSONPath применяется к ответу как к JSON-документу.</span>
+                        </span>
+                    </span>
+                </label>
+                <label class="option">
+                    <input type="radio" name="parseMode" value="xpath">
+                    <span class="sub">
+                        XPath
+                        <span class="sub-field" data-for-parse="xpath">
+                            <input type="text" id="parseExprXPath" placeholder="Например: /answer/item[1]/name/text()">
+                            <span class="hint">Выражение XPath применяется к ответу как к XML-документу.</span>
+                        </span>
+                    </span>
+                </label>
+            </fieldset>
+
+            <fieldset>
+                <legend>Глубина размышлений</legend>
+                <label class="option">
+                    <input type="radio" name="reasoningEffort" value="" checked>
+                    <span>По умолчанию (не передавать)</span>
+                </label>
+                <label class="option">
+                    <input type="radio" name="reasoningEffort" value="low">
+                    <span>low — неглубокие размышления (быстрее и дешевле)</span>
+                </label>
+                <label class="option">
+                    <input type="radio" name="reasoningEffort" value="high">
+                    <span>high — глубокие размышления</span>
+                </label>
+                <label class="option">
+                    <input type="radio" name="reasoningEffort" value="max">
+                    <span>max — максимум (для kimi-k3.1-pro это значение по умолчанию)</span>
+                </label>
+            </fieldset>
+            </div>
+        </aside>
     </div>
 </div>
 
@@ -101,47 +447,423 @@
     const inputEl = document.getElementById('input');
     const sendBtn = document.getElementById('send');
 
+    // ----- Settings frame: show/hide subordinate fields -----
+    const formatRadios = document.querySelectorAll('input[name="format"]');
+    const stopRadios = document.querySelectorAll('input[name="stopMode"]');
+    const parseRadios = document.querySelectorAll('input[name="parseMode"]');
+
+    function updateSubFields(radios, attr) {
+        const checked = document.querySelector('input[name="' + radios[0].name + '"]:checked').value;
+        document.querySelectorAll('[' + attr + ']').forEach(el => {
+            el.classList.toggle('visible', el.getAttribute(attr) === checked);
+        });
+    }
+    function refreshSettings() {
+        updateSubFields(formatRadios, 'data-for');
+        updateSubFields(stopRadios, 'data-for-stop');
+        updateSubFields(parseRadios, 'data-for-parse');
+    }
+    formatRadios.forEach(r => r.addEventListener('change', refreshSettings));
+    stopRadios.forEach(r => r.addEventListener('change', refreshSettings));
+    parseRadios.forEach(r => r.addEventListener('change', refreshSettings));
+    refreshSettings();
+
+    // Reset all settings to their defaults in one click.
+    document.getElementById('resetSettings').addEventListener('click', () => {
+        document.querySelector('input[name="format"][value="none"]').checked = true;
+        document.querySelector('input[name="stopMode"][value="natural"]').checked = true;
+        document.querySelector('input[name="parseMode"][value="none"]').checked = true;
+        document.querySelector('input[name="reasoningEffort"][value=""]').checked = true;
+        document.getElementById('formatDescJson').value = '';
+        document.getElementById('formatDescXml').value = '';
+        document.getElementById('formatDescStyled').value = '';
+        document.getElementById('maxTokens').value = 500;
+        document.getElementById('stopSequences').value = '';
+        document.getElementById('parseExprJsonPath').value = '';
+        document.getElementById('parseExprXPath').value = '';
+        refreshSettings();
+    });
+
+    // ----- Saved settings presets (backend SQLite store) -----
+    const presetSelect = document.getElementById('presetSelect');
+    const settingsStatus = document.getElementById('settingsStatus');
+    let statusTimer = null;
+
+    function showStatus(text, isError) {
+        settingsStatus.textContent = text;
+        settingsStatus.classList.toggle('error', !!isError);
+        clearTimeout(statusTimer);
+        statusTimer = setTimeout(() => { settingsStatus.textContent = ''; }, 4000);
+    }
+
+    function setRadio(name, value) {
+        const radio = document.querySelector('input[name="' + name + '"][value="' + value + '"]');
+        if (radio) radio.checked = true;
+    }
+
+    // Applies a preset object (same shape as collectSettings() output) to the form.
+    function applySettings(s) {
+        if (!s) return;
+        setRadio('format', s.format || 'none');
+        document.getElementById('formatDescJson').value = (s.format === 'json' && s.formatDescription) || '';
+        document.getElementById('formatDescXml').value = (s.format === 'xml' && s.formatDescription) || '';
+        document.getElementById('formatDescStyled').value = (s.format === 'styled' && s.formatDescription) || '';
+        setRadio('stopMode', s.maxTokens ? 'max_tokens' : (s.stopSequences ? 'sequences' : 'natural'));
+        document.getElementById('maxTokens').value = s.maxTokens || 500;
+        document.getElementById('stopSequences').value = s.stopSequences || '';
+        setRadio('parseMode', s.parseMode || 'none');
+        document.getElementById('parseExprJsonPath').value = (s.parseMode === 'jsonpath' && s.parseExpression) || '';
+        document.getElementById('parseExprXPath').value = (s.parseMode === 'xpath' && s.parseExpression) || '';
+        setRadio('reasoningEffort', s.reasoningEffort || '');
+        refreshSettings();
+    }
+
+    async function loadPresets(selectName) {
+        try {
+            const resp = await fetch('/api/presets');
+            const data = await resp.json();
+            presetSelect.innerHTML = '<option value="">Сохранённые настройки…</option>';
+            const addGroup = (label, items) => {
+                if (!items.length) return;
+                const group = document.createElement('optgroup');
+                group.label = label;
+                for (const p of items) {
+                    const option = document.createElement('option');
+                    option.value = p.id;
+                    option.textContent = p.name;
+                    option.dataset.settings = JSON.stringify(p.settings);
+                    if (p.name === selectName) option.selected = true;
+                    group.appendChild(option);
+                }
+                presetSelect.appendChild(group);
+            };
+            addGroup('Мои наборы', data.presets.filter(p => !p.isDefault));
+            addGroup('Примеры', data.presets.filter(p => p.isDefault));
+        } catch (e) {
+            showStatus('Не удалось загрузить сохранённые настройки', true);
+        }
+    }
+
+    presetSelect.addEventListener('change', () => {
+        const option = presetSelect.selectedOptions[0];
+        if (!option || !option.dataset.settings) return;
+        applySettings(JSON.parse(option.dataset.settings));
+        showStatus('Применён набор «' + option.textContent + '»');
+    });
+
+    document.getElementById('saveSettings').addEventListener('click', async () => {
+        const name = (prompt('Название набора настроек:') || '').trim();
+        if (!name) return;
+        try {
+            const resp = await fetch('/api/presets', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name, settings: collectSettings() })
+            });
+            const data = await resp.json();
+            if (!resp.ok) {
+                showStatus('Ошибка сохранения: ' + (data.error || ('HTTP ' + resp.status)), true);
+                return;
+            }
+            await loadPresets(name);
+            showStatus('Сохранено «' + name + '»');
+        } catch (e) {
+            showStatus('Ошибка сети: ' + e.message, true);
+        }
+    });
+
+    document.getElementById('deletePreset').addEventListener('click', async () => {
+        const option = presetSelect.selectedOptions[0];
+        if (!option || !option.value) {
+            showStatus('Сначала выберите набор в списке', true);
+            return;
+        }
+        const name = option.textContent;
+        if (!confirm('Удалить набор «' + name + '»?')) return;
+        try {
+            const resp = await fetch('/api/presets?id=' + encodeURIComponent(option.value), { method: 'DELETE' });
+            const data = await resp.json();
+            if (!resp.ok) {
+                showStatus('Ошибка удаления: ' + (data.error || ('HTTP ' + resp.status)), true);
+                return;
+            }
+            await loadPresets();
+            showStatus('Удалён набор «' + name + '»');
+        } catch (e) {
+            showStatus('Ошибка сети: ' + e.message, true);
+        }
+    });
+
+    loadPresets();
+
+    function collectSettings() {
+        const format = document.querySelector('input[name="format"]:checked').value;
+        const stopMode = document.querySelector('input[name="stopMode"]:checked').value;
+        const parseMode = document.querySelector('input[name="parseMode"]:checked').value;
+        const settings = { format };
+
+        if (format === 'json') {
+            settings.formatDescription = document.getElementById('formatDescJson').value.trim();
+        } else if (format === 'xml') {
+            settings.formatDescription = document.getElementById('formatDescXml').value.trim();
+        } else if (format === 'styled') {
+            settings.formatDescription = document.getElementById('formatDescStyled').value.trim();
+        }
+
+        if (stopMode === 'max_tokens') {
+            const n = parseInt(document.getElementById('maxTokens').value, 10);
+            if (Number.isInteger(n) && n > 0) settings.maxTokens = n;
+        } else if (stopMode === 'sequences') {
+            settings.stopSequences = document.getElementById('stopSequences').value.trim();
+        }
+
+        if (parseMode === 'jsonpath') {
+            settings.parseMode = parseMode;
+            settings.parseExpression = document.getElementById('parseExprJsonPath').value.trim();
+        } else if (parseMode === 'xpath') {
+            settings.parseMode = parseMode;
+            settings.parseExpression = document.getElementById('parseExprXPath').value.trim();
+        }
+
+        const reasoningEffort = document.querySelector('input[name="reasoningEffort"]:checked').value;
+        if (reasoningEffort) settings.reasoningEffort = reasoningEffort;
+        return settings;
+    }
+
+    // ----- Chat -----
     function addMessage(text, role) {
         const div = document.createElement('div');
         div.className = 'msg ' + role;
+        div.dataset.text = text;
         div.textContent = text;
         chatEl.appendChild(div);
         chatEl.scrollTop = chatEl.scrollHeight;
         return div;
     }
 
-    async function sendMessage() {
-        const text = inputEl.value.trim();
+    // Renders a small caption with the settings the server actually applied.
+    const FORMAT_LABELS = {
+        json: 'JSON',
+        xml: 'XML',
+        yaml: 'YAML',
+        'markdown-table': 'Markdown-таблица',
+        'chain-of-thought': 'Chain-of-Thought',
+        'styled': 'Стилизованный текст'
+    };
+
+    function addAppliedMeta(msgDiv, applied, stats) {
+        const parts = [];
+        if (applied) {
+            if (applied.format && applied.format !== 'none' && FORMAT_LABELS[applied.format]) {
+                let f = 'Формат: ' + FORMAT_LABELS[applied.format];
+                if (applied.formatDescription) f += ' (с описанием)';
+                parts.push(f);
+            }
+            if (applied.maxTokens) parts.push('max_tokens: ' + applied.maxTokens);
+            if (Array.isArray(applied.stopSequences) && applied.stopSequences.length) {
+                parts.push('стоп-последовательности: ' + applied.stopSequences.join(', '));
+            }
+            if (applied.reasoningEffort) parts.push('размышления: ' + applied.reasoningEffort);
+        }
+        if (stats) {
+            if (typeof stats.elapsedMs === 'number') {
+                parts.push('время: ' + (stats.elapsedMs / 1000).toFixed(1) + ' с');
+            }
+            const p = stats.promptTokens, c = stats.completionTokens, t = stats.totalTokens;
+            if (p != null && c != null) {
+                let tok = 'токены: ' + p + ' (запрос) + ' + c + ' (ответ)';
+                if (stats.reasoningTokens != null) tok += ', из них ' + stats.reasoningTokens + ' на размышления';
+                if (t != null) tok += ' = ' + t;
+                parts.push(tok);
+            } else if (t != null) {
+                parts.push('токены: ' + t);
+            }
+            if (stats.finishReason) parts.push('finish_reason: ' + stats.finishReason);
+        }
+        if (!parts.length) return;
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.textContent = parts.join(' · ');
+        msgDiv.appendChild(meta);
+    }
+
+    // Adds a dedicated bubble with the parsing result under the reply.
+    function addParsedMessage(text, mode) {
+        const div = addMessage(text, 'parsed');
+        const label = document.createElement('div');
+        label.className = 'meta top';
+        label.textContent = 'Результат парсинга (' + (mode === 'jsonpath' ? 'JSONPath' : 'XPath') + ')';
+        div.prepend(label);
+    }
+
+    // Parses one raw SSE frame ("event: X\ndata: Y") into an object.
+    function parseSseEvent(raw) {
+        let event = 'message', data = '';
+        for (const line of raw.split('\n')) {
+            if (line.startsWith('event:')) event = line.slice(6).trim();
+            else if (line.startsWith('data:')) data += (data ? '\n' : '') + line.slice(5).trim();
+        }
+        return data ? { event, data } : null;
+    }
+
+    async function sendMessage(presetText) {
+        const fromInput = presetText === undefined;
+        const text = (fromInput ? inputEl.value : presetText).trim();
         if (!text) return;
 
-        inputEl.value = '';
+        if (fromInput) inputEl.value = '';
         sendBtn.disabled = true;
         addMessage(text, 'user');
-        const pending = addMessage('Thinking…', 'assistant pending');
+        const bubble = addMessage('Думаю…', 'assistant pending');
+
+        // Elapsed-time indicator while the model is "thinking" (before the first token)
+        const waitStart = Date.now();
+        const waitTimer = setInterval(() => {
+            if (!bubble.isConnected || !bubble.classList.contains('pending')) {
+                clearInterval(waitTimer);
+                return;
+            }
+            bubble.textContent = 'Думаю… ' + Math.floor((Date.now() - waitStart) / 1000) + ' с';
+        }, 1000);
 
         try {
             const resp = await fetch('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: text })
+                body: JSON.stringify({ message: text, ...collectSettings() })
             });
-            const data = await resp.json();
-            pending.remove();
-            if (resp.ok && data.reply !== undefined) {
-                addMessage(data.reply, 'assistant');
-            } else {
+            if (!resp.ok) { // pre-stream validation errors come back as plain JSON
+                const data = await resp.json().catch(() => ({}));
+                bubble.remove();
                 addMessage(data.error || ('HTTP ' + resp.status), 'error');
+                return;
+            }
+
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let replyText = '';
+            let doneData = null;
+            let failed = false;
+            // Collapsible gray block with the model's "thinking" (reasoning models)
+            let reasoningEl = null, reasoningBody = null, reasoningSummary = null, reasoningText = '';
+
+            while (true) {
+                const { value, done: streamDone } = await reader.read();
+                if (streamDone) break;
+                buffer += decoder.decode(value, { stream: true });
+
+                let idx;
+                while ((idx = buffer.indexOf('\n\n')) >= 0) {
+                    const frame = parseSseEvent(buffer.slice(0, idx));
+                    buffer = buffer.slice(idx + 2);
+                    if (!frame) continue;
+
+                    if (frame.event === 'token') {
+                        replyText += JSON.parse(frame.data).text;
+                        bubble.classList.remove('pending');
+                        bubble.textContent = replyText;
+                        chatEl.scrollTop = chatEl.scrollHeight;
+                    } else if (frame.event === 'reasoning') {
+                        if (!reasoningEl) {
+                            reasoningEl = document.createElement('details');
+                            reasoningEl.className = 'reasoning';
+                            reasoningSummary = document.createElement('summary');
+                            reasoningBody = document.createElement('div');
+                            reasoningBody.className = 'reasoning-body';
+                            reasoningEl.appendChild(reasoningSummary);
+                            reasoningEl.appendChild(reasoningBody);
+                            chatEl.insertBefore(reasoningEl, bubble);
+                        }
+                        reasoningText += JSON.parse(frame.data).text;
+                        reasoningBody.textContent = reasoningText;
+                        reasoningSummary.textContent = 'Размышления модели (' + reasoningText.length + ' зн.)';
+                        chatEl.scrollTop = chatEl.scrollHeight;
+                    } else if (frame.event === 'done') {
+                        doneData = JSON.parse(frame.data);
+                    } else if (frame.event === 'error') {
+                        const err = JSON.parse(frame.data);
+                        bubble.remove();
+                        addMessage(err.error || 'Ошибка генерации', 'error');
+                        failed = true;
+                        return;
+                    }
+                }
+            }
+            if (failed) return;
+
+            // Stream finished: finalize the reply bubble.
+            bubble.classList.remove('pending');
+            if (!replyText && doneData && doneData.reply) replyText = doneData.reply;
+            bubble.dataset.text = replyText;
+            bubble.textContent = replyText || '(пустой ответ)';
+            if (doneData) {
+                addAppliedMeta(bubble, doneData.applied, doneData.stats);
+                if (!replyText && doneData.stats && doneData.stats.finishReason === 'length') {
+                    addMessage('Модель исчерпала лимит max_tokens ещё на этапе «размышлений» '
+                        + '(reasoning-токены расходуют тот же бюджет), поэтому видимый ответ пуст. '
+                        + 'Увеличьте max_tokens или выберите «Естественная остановка».', 'error');
+                }
+                if (doneData.parsed !== undefined) {
+                    addParsedMessage(doneData.parsed, doneData.parseMode);
+                } else if (doneData.parseError) {
+                    addMessage('Ошибка парсинга: ' + doneData.parseError, 'error');
+                }
             }
         } catch (e) {
-            pending.remove();
-            addMessage('Network error: ' + e.message, 'error');
+            bubble.remove();
+            addMessage('Ошибка сети: ' + e.message, 'error');
         } finally {
+            clearInterval(waitTimer);
             sendBtn.disabled = false;
             inputEl.focus();
         }
     }
 
-    sendBtn.addEventListener('click', sendMessage);
+    // ----- Context menu on user requests: repeat with current settings -----
+    const menuEl = document.createElement('div');
+    menuEl.className = 'context-menu';
+    const repeatBtn = document.createElement('button');
+    repeatBtn.type = 'button';
+    repeatBtn.textContent = 'Повторить с текущими настройками';
+    menuEl.appendChild(repeatBtn);
+    document.body.appendChild(menuEl);
+
+    let repeatText = null;
+
+    function hideMenu() {
+        menuEl.classList.remove('visible');
+    }
+
+    chatEl.addEventListener('contextmenu', (e) => {
+        const msg = e.target.closest('.msg.user');
+        if (!msg) return;
+        e.preventDefault();
+        repeatText = msg.dataset.text || msg.textContent;
+
+        menuEl.classList.add('visible');
+        const menuW = menuEl.offsetWidth, menuH = menuEl.offsetHeight;
+        menuEl.style.left = Math.min(e.pageX, window.innerWidth - menuW - 8) + 'px';
+        menuEl.style.top = Math.min(e.pageY, window.innerHeight + window.scrollY - menuH - 8) + 'px';
+    });
+
+    repeatBtn.addEventListener('click', () => {
+        hideMenu();
+        if (repeatText) sendMessage(repeatText);
+    });
+
+    document.addEventListener('click', (e) => {
+        if (!menuEl.contains(e.target)) hideMenu();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') hideMenu();
+    });
+    window.addEventListener('scroll', hideMenu, true);
+    window.addEventListener('resize', hideMenu);
+
+    // NB: pass no arguments — otherwise the click event object would be
+    // mistaken for the preset text used by the repeat-request feature.
+    sendBtn.addEventListener('click', () => sendMessage());
     inputEl.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
@@ -149,6 +871,22 @@
         }
     });
     inputEl.focus();
+
+    // ----- Frontend error logging: surface JS failures in the chat -----
+    function reportFrontendError(text) {
+        try {
+            addMessage('Ошибка интерфейса: ' + text, 'error');
+        } catch (ignored) {
+            // never let error reporting break the page
+        }
+    }
+    window.addEventListener('error', (e) => {
+        reportFrontendError(e.message + (e.filename ? ' (' + e.filename.split('/').pop() + ':' + e.lineno + ')' : ''));
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+        const reason = e.reason instanceof Error ? e.reason.message : String(e.reason);
+        reportFrontendError('необработанный Promise: ' + reason);
+    });
 </script>
 </body>
 </html>
