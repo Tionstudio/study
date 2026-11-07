@@ -1,0 +1,39 @@
+{
+  "tasks": [
+    {
+      "name": "Породы кошек",
+      "message": "Перечисли основные российские породы кошек",
+      "settingsGroups": [
+        {
+          "name": "Markdown-таблица",
+          "settings": { "format": "markdown-table" }
+        },
+        {
+          "name": "JSON",
+          "settings": {
+            "format": "json",
+            "formatDescription": "{\"breeds\": [{\"name\": string, \"origin\": string}]}"
+          }
+        },
+        {
+          "name": "Свободный ответ",
+          "settings": {}
+        }
+      ]
+    },
+    {
+      "name": "Стихотворение про осень",
+      "message": "Напиши короткое стихотворение про осень",
+      "settingsGroups": [
+        {
+          "name": "Быстро и кратко",
+          "settings": { "maxTokens": 300, "reasoningEffort": "low" }
+        },
+        {
+          "name": "С размышлениями",
+          "settings": { "reasoningEffort": "high" }
+        }
+      ]
+    }
+  ]
+}

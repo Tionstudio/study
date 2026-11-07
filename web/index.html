@@ -23,6 +23,9 @@
             gap: 12px;
         }
         h1 { font-size: 20px; color: #1a1a1a; }
+        .header { display: flex; align-items: baseline; gap: 16px; }
+        .nav-link { font-size: 13px; color: #2563eb; text-decoration: none; }
+        .nav-link:hover { text-decoration: underline; }
 
         /* ---------- Two-column layout: chat left, settings right ---------- */
         .layout {
@@ -183,6 +186,55 @@
         .msg.user { align-self: flex-end; background: #2563eb; color: #fff; }
         .msg.assistant { align-self: flex-start; background: #e5e7eb; color: #1a1a1a; }
         .msg.error { align-self: flex-start; background: #fee2e2; color: #991b1b; }
+
+        /* ---------- Rendered markdown inside assistant bubbles ---------- */
+        .msg.assistant.md { white-space: normal; }
+        .msg.assistant.md p { margin: 4px 0; }
+        .msg.assistant.md .md-h { font-weight: 600; margin: 10px 0 4px; }
+        .msg.assistant.md .md-h1 { font-size: 17px; }
+        .msg.assistant.md .md-h2 { font-size: 15.5px; }
+        .msg.assistant.md .md-h3, .msg.assistant.md .md-h4 { font-size: 14px; }
+        .msg.assistant.md .md-list { margin: 4px 0 4px 22px; }
+        .msg.assistant.md .md-list li { margin: 2px 0; }
+        .msg.assistant.md .md-table { border-collapse: collapse; margin: 6px 0; font-size: 13px; }
+        .msg.assistant.md .md-table th, .msg.assistant.md .md-table td {
+            border: 1px solid #c7ccd1;
+            padding: 4px 10px;
+            text-align: left;
+        }
+        .msg.assistant.md .md-table th { background: rgba(0, 0, 0, 0.05); font-weight: 600; }
+        .msg.assistant.md code {
+            background: rgba(0, 0, 0, 0.08);
+            padding: 1px 5px;
+            border-radius: 4px;
+            font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+            font-size: 12.5px;
+        }
+        .msg.assistant.md .md-code {
+            background: #1f2937;
+            color: #e5e7eb;
+            padding: 10px 12px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 6px 0;
+            font-size: 12.5px;
+        }
+        .msg.assistant.md .md-code code { background: none; padding: 0; }
+        .msg.assistant.md .md-quote {
+            border-left: 3px solid #c7ccd1;
+            margin: 4px 0;
+            padding: 2px 10px;
+            color: #4b5563;
+        }
+        .msg.assistant.md .md-hr { border: none; border-top: 1px solid #c7ccd1; margin: 8px 0; }
+        .msg.assistant.md a { color: #1d4ed8; }
+        .msg.context-note {
+            align-self: center;
+            background: transparent;
+            color: #9ca3af;
+            font-size: 12px;
+            padding: 2px 8px;
+        }
         .reasoning {
             align-self: flex-start;
             max-width: 85%;
@@ -235,6 +287,12 @@
             font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
         }
         .input-row { display: flex; gap: 8px; }
+        .chat-status {
+            font-size: 12px;
+            color: #9ca3af;
+            min-height: 15px;
+            padding: 0 4px;
+        }
         #input {
             flex: 1;
             padding: 12px 14px;
@@ -255,6 +313,34 @@
             cursor: pointer;
         }
         #send:disabled { background: #9ca3af; cursor: default; }
+
+        .context-limit-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 0 4px 26px;
+            font-size: 14px;
+            color: #1f2937;
+        }
+        .context-limit-row input[type="number"] {
+            width: 100px;
+            padding: 6px 10px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 13px;
+            font-family: inherit;
+        }
+        #newChat {
+            padding: 7px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            background: #fff;
+            color: #374151;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        #newChat:hover { background: #f3f4f6; }
+        input:disabled + span, input:disabled { opacity: 0.5; }
 
         /* ---------- Context menu ---------- */
         .context-menu {
@@ -285,11 +371,15 @@
 </head>
 <body>
 <div class="container">
-    <h1>LLM Chat</h1>
+    <div class="header">
+        <h1>LLM Chat</h1>
+        <a class="nav-link" href="/batch.html">Пакетный режим →</a>
+    </div>
 
     <div class="layout">
         <div class="chat-column">
             <div id="chat"></div>
+            <div id="chatStatus" class="chat-status"></div>
             <div class="input-row">
                 <textarea id="input" rows="2" placeholder="Введите запрос… (Enter — отправить, Shift+Enter — новая строка)"></textarea>
                 <button id="send">Отправить</button>
@@ -437,6 +527,20 @@
                     <span>max — максимум (для kimi-k3.1-pro это значение по умолчанию)</span>
                 </label>
             </fieldset>
+
+            <fieldset>
+                <legend>Контекст диалога</legend>
+                <label class="option">
+                    <input type="checkbox" id="useContext">
+                    <span>Сохранять контекст (история хранится на сервере)</span>
+                </label>
+                <div class="context-limit-row">
+                    <span>Лимит, токенов:</span>
+                    <input type="number" id="contextLimit" min="100" value="8000">
+                </div>
+                <span class="hint">При переполнении старые сообщения заменяются сводкой от LLM (оценка ~3 символа на токен).</span>
+                <button id="newChat" type="button">Новый диалог</button>
+            </fieldset>
             </div>
         </aside>
     </div>
@@ -446,6 +550,37 @@
     const chatEl = document.getElementById('chat');
     const inputEl = document.getElementById('input');
     const sendBtn = document.getElementById('send');
+
+    // ----- Conversation context: server-side history id (context mode) -----
+    const CONV_KEY = 'chatConversationId';
+    let conversationId = localStorage.getItem(CONV_KEY) || null;
+
+    // Cumulative tokens spent (replies + summarization calls), persisted
+    // across page reloads like the conversation id
+    const TOKENS_KEY = 'chatTotalTokensSpent';
+    let totalTokensSpent = parseInt(localStorage.getItem(TOKENS_KEY), 10) || 0;
+
+    // Last known context window state (from the latest done frame / restore)
+    let lastContextInfo = null;
+
+    // Status line under the chat: total tokens spent + current context size
+    function updateChatStatus() {
+        const parts = ['токены(total): ' + totalTokensSpent];
+        if (lastContextInfo) {
+            const c = lastContextInfo;
+            if (c.keptMessages == null) { // restored from server, window not yet known
+                parts.push('контекст: ' + c.totalMessages + ' сообщений в истории'
+                    + (c.hasSummary ? ', старая часть в сводке' : ''));
+            } else {
+                let t = 'контекст: ' + c.keptMessages + ' из ' + c.totalMessages + ' сообщений';
+                if (c.summaryChars > 0) t += ', сводка ' + c.summaryChars + ' зн.';
+                if (typeof c.fillPercent === 'number') t += ', лимит: ' + c.fillPercent + '%';
+                parts.push(t);
+            }
+        }
+        document.getElementById('chatStatus').textContent = parts.join(' · ');
+    }
+    updateChatStatus();
 
     // ----- Settings frame: show/hide subordinate fields -----
     const formatRadios = document.querySelectorAll('input[name="format"]');
@@ -462,10 +597,14 @@
         updateSubFields(formatRadios, 'data-for');
         updateSubFields(stopRadios, 'data-for-stop');
         updateSubFields(parseRadios, 'data-for-parse');
+        // Context options are editable only while context mode is on
+        const ctxOn = document.getElementById('useContext').checked;
+        document.getElementById('contextLimit').disabled = !ctxOn;
     }
     formatRadios.forEach(r => r.addEventListener('change', refreshSettings));
     stopRadios.forEach(r => r.addEventListener('change', refreshSettings));
     parseRadios.forEach(r => r.addEventListener('change', refreshSettings));
+    document.getElementById('useContext').addEventListener('change', refreshSettings);
     refreshSettings();
 
     // Reset all settings to their defaults in one click.
@@ -481,6 +620,8 @@
         document.getElementById('stopSequences').value = '';
         document.getElementById('parseExprJsonPath').value = '';
         document.getElementById('parseExprXPath').value = '';
+        document.getElementById('useContext').checked = false;
+        document.getElementById('contextLimit').value = 8000;
         refreshSettings();
     });
 
@@ -515,6 +656,8 @@
         document.getElementById('parseExprJsonPath').value = (s.parseMode === 'jsonpath' && s.parseExpression) || '';
         document.getElementById('parseExprXPath').value = (s.parseMode === 'xpath' && s.parseExpression) || '';
         setRadio('reasoningEffort', s.reasoningEffort || '');
+        document.getElementById('useContext').checked = !!s.useContext;
+        document.getElementById('contextLimit').value = s.contextLimit || 8000;
         refreshSettings();
     }
 
@@ -627,10 +770,126 @@
 
         const reasoningEffort = document.querySelector('input[name="reasoningEffort"]:checked').value;
         if (reasoningEffort) settings.reasoningEffort = reasoningEffort;
+
+        if (document.getElementById('useContext').checked) {
+            settings.useContext = true;
+            const limit = parseInt(document.getElementById('contextLimit').value, 10);
+            if (Number.isInteger(limit) && limit > 0) settings.contextLimit = limit;
+        }
         return settings;
     }
 
     // ----- Chat -----
+    // Minimal dependency-free Markdown renderer for assistant replies:
+    // escapes HTML first, then renders code blocks, tables, headings,
+    // lists, quotes, hr, links and inline bold/italic/code.
+    function escapeHtml(s) {
+        return s.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function renderMarkdown(src) {
+        const lines = String(src).replace(/\r\n/g, '\n').split('\n');
+        let html = '';
+        let para = [];
+        let i = 0;
+
+        const inline = (text) => {
+            let t = escapeHtml(text);
+            t = t.replace(/`([^`]+)`/g, '<code>$1</code>');
+            t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+            t = t.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+            t = t.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+            t = t.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
+                '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+            return t;
+        };
+        const flushPara = () => {
+            if (para.length) {
+                html += '<p>' + para.map(inline).join('<br>') + '</p>';
+                para = [];
+            }
+        };
+        const splitRow = (row) => row.trim().replace(/^\|/, '').replace(/\|$/, '')
+            .split('|').map(c => c.trim());
+
+        while (i < lines.length) {
+            const line = lines[i];
+
+            if (/^\s*```/.test(line)) { // fenced code block
+                flushPara();
+                const code = [];
+                i++;
+                while (i < lines.length && !/^\s*```/.test(lines[i])) { code.push(lines[i]); i++; }
+                i++; // closing fence
+                html += '<pre class="md-code"><code>' + escapeHtml(code.join('\n')) + '</code></pre>';
+                continue;
+            }
+
+            // table: a | row followed by a --- separator row
+            if (line.includes('|') && i + 1 < lines.length
+                    && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1]) && lines[i + 1].includes('-')) {
+                flushPara();
+                const headers = splitRow(line);
+                i += 2;
+                const rows = [];
+                while (i < lines.length && lines[i].includes('|') && lines[i].trim() !== '') {
+                    rows.push(splitRow(lines[i]));
+                    i++;
+                }
+                html += '<table class="md-table"><thead><tr>'
+                    + headers.map(h => '<th>' + inline(h) + '</th>').join('')
+                    + '</tr></thead><tbody>'
+                    + rows.map(r => '<tr>' + r.map(c => '<td>' + inline(c) + '</td>').join('') + '</tr>').join('')
+                    + '</tbody></table>';
+                continue;
+            }
+
+            const h = line.match(/^(#{1,4})\s+(.*)$/); // heading
+            if (h) {
+                flushPara();
+                html += '<div class="md-h md-h' + h[1].length + '">' + inline(h[2]) + '</div>';
+                i++;
+                continue;
+            }
+
+            if (/^\s*>\s?/.test(line)) { // blockquote
+                flushPara();
+                html += '<blockquote class="md-quote">' + inline(line.replace(/^\s*>\s?/, '')) + '</blockquote>';
+                i++;
+                continue;
+            }
+
+            if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) { // horizontal rule
+                flushPara();
+                html += '<hr class="md-hr">';
+                i++;
+                continue;
+            }
+
+            if (/^\s*([-*+]|\d+\.)\s+/.test(line)) { // list
+                flushPara();
+                const ordered = /^\s*\d+\./.test(line);
+                const items = [];
+                while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
+                    items.push(lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, ''));
+                    i++;
+                }
+                const tag = ordered ? 'ol' : 'ul';
+                html += '<' + tag + ' class="md-list">'
+                    + items.map(it => '<li>' + inline(it) + '</li>').join('')
+                    + '</' + tag + '>';
+                continue;
+            }
+
+            if (line.trim() === '') { flushPara(); i++; continue; }
+            para.push(line);
+            i++;
+        }
+        flushPara();
+        return html;
+    }
+
     function addMessage(text, role) {
         const div = document.createElement('div');
         div.className = 'msg ' + role;
@@ -651,7 +910,7 @@
         'styled': 'Стилизованный текст'
     };
 
-    function addAppliedMeta(msgDiv, applied, stats) {
+    function addAppliedMeta(msgDiv, applied, stats, context) {
         const parts = [];
         if (applied) {
             if (applied.format && applied.format !== 'none' && FORMAT_LABELS[applied.format]) {
@@ -664,6 +923,11 @@
                 parts.push('стоп-последовательности: ' + applied.stopSequences.join(', '));
             }
             if (applied.reasoningEffort) parts.push('размышления: ' + applied.reasoningEffort);
+        }
+        if (context) {
+            let ctx = 'контекст: ' + context.keptMessages + ' из ' + context.totalMessages + ' сообщений';
+            if (context.summaryChars > 0) ctx += ', сводка ' + context.summaryChars + ' зн.';
+            parts.push(ctx);
         }
         if (stats) {
             if (typeof stats.elapsedMs === 'number') {
@@ -727,10 +991,12 @@
         }, 1000);
 
         try {
+            const payload = { message: text, ...collectSettings() };
+            if (payload.useContext && conversationId) payload.conversationId = conversationId;
             const resp = await fetch('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: text, ...collectSettings() })
+                body: JSON.stringify(payload)
             });
             if (!resp.ok) { // pre-stream validation errors come back as plain JSON
                 const data = await resp.json().catch(() => ({}));
@@ -779,6 +1045,16 @@
                         reasoningBody.textContent = reasoningText;
                         reasoningSummary.textContent = 'Размышления модели (' + reasoningText.length + ' зн.)';
                         chatEl.scrollTop = chatEl.scrollHeight;
+                    } else if (frame.event === 'conversation') {
+                        // Context mode: the server assigned (or confirmed) the
+                        // conversation id — remember it for the next requests.
+                        conversationId = JSON.parse(frame.data).id;
+                        localStorage.setItem(CONV_KEY, conversationId);
+                    } else if (frame.event === 'context') {
+                        const c = JSON.parse(frame.data);
+                        addMessage('Контекст: отправлено ' + c.keptMessages + ' из ' + c.totalMessages
+                            + ' сообщений' + (c.summary ? ' + сводка старой части диалога' : '') + '.',
+                            'context-note');
                     } else if (frame.event === 'done') {
                         doneData = JSON.parse(frame.data);
                     } else if (frame.event === 'error') {
@@ -796,9 +1072,23 @@
             bubble.classList.remove('pending');
             if (!replyText && doneData && doneData.reply) replyText = doneData.reply;
             bubble.dataset.text = replyText;
-            bubble.textContent = replyText || '(пустой ответ)';
+            if (replyText) {
+                bubble.classList.add('md');
+                bubble.innerHTML = renderMarkdown(replyText);
+            } else {
+                bubble.textContent = '(пустой ответ)';
+            }
             if (doneData) {
-                addAppliedMeta(bubble, doneData.applied, doneData.stats);
+                if (doneData.stats) {
+                    const s = doneData.stats;
+                    const spent = (s.totalTokens != null ? s.totalTokens
+                        : (s.promptTokens || 0) + (s.completionTokens || 0)) + (s.auxTokens || 0);
+                    totalTokensSpent += spent;
+                    localStorage.setItem(TOKENS_KEY, String(totalTokensSpent));
+                }
+                if (doneData.context) lastContextInfo = doneData.context;
+                updateChatStatus();
+                addAppliedMeta(bubble, doneData.applied, doneData.stats, doneData.context);
                 if (!replyText && doneData.stats && doneData.stats.finishReason === 'length') {
                     addMessage('Модель исчерпала лимит max_tokens ещё на этапе «размышлений» '
                         + '(reasoning-токены расходуют тот же бюджет), поэтому видимый ответ пуст. '
@@ -871,6 +1161,58 @@
         }
     });
     inputEl.focus();
+
+    // ----- "Новый диалог": drop the server-side history and clear the chat -----
+    document.getElementById('newChat').addEventListener('click', async () => {
+        if (conversationId) {
+            try {
+                await fetch('/api/conversations?id=' + encodeURIComponent(conversationId),
+                    { method: 'DELETE' });
+            } catch (e) { /* best effort: the local state is reset anyway */ }
+        }
+        conversationId = null;
+        localStorage.removeItem(CONV_KEY);
+        totalTokensSpent = 0;
+        localStorage.removeItem(TOKENS_KEY);
+        lastContextInfo = null;
+        updateChatStatus();
+        chatEl.innerHTML = '';
+        showStatus('Начат новый диалог');
+        inputEl.focus();
+    });
+
+    // ----- Restore the previous conversation after a page reload -----
+    (async function restoreConversation() {
+        if (!conversationId) return;
+        try {
+            const resp = await fetch('/api/conversations?id=' + encodeURIComponent(conversationId));
+            if (!resp.ok) { // unknown id (server wiped / другой браузер) — forget it
+                conversationId = null;
+                localStorage.removeItem(CONV_KEY);
+                totalTokensSpent = 0;
+                localStorage.removeItem(TOKENS_KEY);
+                lastContextInfo = null;
+                updateChatStatus();
+                return;
+            }
+            const data = await resp.json();
+            for (const m of data.messages) {
+                const div = addMessage(m.content, m.role === 'user' ? 'user' : 'assistant');
+                if (m.role === 'assistant') {
+                    div.classList.add('md');
+                    div.innerHTML = renderMarkdown(m.content);
+                }
+            }
+            if (data.messages.length) {
+                addMessage('История диалога восстановлена (' + data.messages.length
+                    + ' сообщений' + (data.hasSummary ? ', старая часть сжата в сводку' : '') + ').',
+                    'context-note');
+                lastContextInfo = { keptMessages: null, totalMessages: data.messages.length,
+                    hasSummary: !!data.hasSummary };
+                updateChatStatus();
+            }
+        } catch (e) { /* history restore is best-effort */ }
+    })();
 
     // ----- Frontend error logging: surface JS failures in the chat -----
     function reportFrontendError(text) {

@@ -1,0 +1,948 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Пакетный режим — LLM Chat</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+            background: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 24px;
+        }
+        .container {
+            width: 100%;
+            max-width: 1400px;
+            height: calc(100vh - 48px);
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .header { display: flex; align-items: baseline; gap: 16px; }
+        h1 { font-size: 20px; color: #1a1a1a; }
+        .nav-link { font-size: 13px; color: #2563eb; text-decoration: none; }
+        .nav-link:hover { text-decoration: underline; }
+
+        .layout { flex: 1; min-height: 0; display: flex; gap: 16px; align-items: stretch; }
+        .chat-column { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
+
+        .settings {
+            width: 380px;
+            flex-shrink: 0;
+            position: sticky;
+            top: 24px;
+            max-height: calc(100vh - 48px);
+            overflow-y: auto;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+        }
+        .settings-title {
+            padding: 12px 16px;
+            font-size: 14px;
+            font-weight: 600;
+            color: #1a1a1a;
+            border-bottom: 1px solid #eee;
+        }
+        .settings-body { padding: 12px 16px 16px; display: flex; flex-direction: column; gap: 14px; }
+        fieldset { border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px 14px 12px; }
+        legend { font-size: 13px; font-weight: 600; color: #374151; padding: 0 6px; }
+        .option { display: flex; align-items: flex-start; gap: 8px; padding: 4px 0; font-size: 14px; color: #1f2937; }
+        .hint { font-size: 12px; color: #6b7280; }
+        .context-limit-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 0 4px 26px;
+            font-size: 14px;
+            color: #1f2937;
+        }
+        .context-limit-row input[type="number"] {
+            width: 100px;
+            padding: 6px 10px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 13px;
+            font-family: inherit;
+        }
+        input:disabled + span, input:disabled { opacity: 0.5; }
+        .btn {
+            padding: 7px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            background: #fff;
+            color: #374151;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .btn:hover { background: #f3f4f6; }
+        .btn.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+        .btn.primary:hover { background: #1d4ed8; }
+        .btn:disabled { background: #9ca3af; border-color: #9ca3af; color: #fff; cursor: default; }
+        .settings-status { font-size: 12px; color: #16a34a; min-height: 15px; }
+        .settings-status.error { color: #991b1b; }
+
+        @media (max-width: 900px) {
+            .container { height: auto; min-height: calc(100vh - 48px); }
+            .layout { flex-direction: column; }
+            .chat-column { min-height: 0; }
+            #chat { min-height: 300px; max-height: 60vh; }
+            .settings { width: 100%; position: static; max-height: none; }
+        }
+
+        /* ---------- Chat ---------- */
+        #chat {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .msg {
+            max-width: 85%;
+            padding: 10px 14px;
+            border-radius: 12px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            line-height: 1.45;
+            font-size: 14px;
+        }
+        .msg.user { align-self: flex-end; background: #2563eb; color: #fff; }
+        .msg.assistant { align-self: flex-start; background: #e5e7eb; color: #1a1a1a; }
+        .msg.error { align-self: flex-start; background: #fee2e2; color: #991b1b; }
+
+        /* ---------- Rendered markdown inside assistant bubbles ---------- */
+        .msg.assistant.md { white-space: normal; }
+        .msg.assistant.md p { margin: 4px 0; }
+        .msg.assistant.md .md-h { font-weight: 600; margin: 10px 0 4px; }
+        .msg.assistant.md .md-h1 { font-size: 17px; }
+        .msg.assistant.md .md-h2 { font-size: 15.5px; }
+        .msg.assistant.md .md-h3, .msg.assistant.md .md-h4 { font-size: 14px; }
+        .msg.assistant.md .md-list { margin: 4px 0 4px 22px; }
+        .msg.assistant.md .md-list li { margin: 2px 0; }
+        .msg.assistant.md .md-table { border-collapse: collapse; margin: 6px 0; font-size: 13px; }
+        .msg.assistant.md .md-table th, .msg.assistant.md .md-table td {
+            border: 1px solid #c7ccd1;
+            padding: 4px 10px;
+            text-align: left;
+        }
+        .msg.assistant.md .md-table th { background: rgba(0, 0, 0, 0.05); font-weight: 600; }
+        .msg.assistant.md code {
+            background: rgba(0, 0, 0, 0.08);
+            padding: 1px 5px;
+            border-radius: 4px;
+            font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+            font-size: 12.5px;
+        }
+        .msg.assistant.md .md-code {
+            background: #1f2937;
+            color: #e5e7eb;
+            padding: 10px 12px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 6px 0;
+            font-size: 12.5px;
+        }
+        .msg.assistant.md .md-code code { background: none; padding: 0; }
+        .msg.assistant.md .md-quote {
+            border-left: 3px solid #c7ccd1;
+            margin: 4px 0;
+            padding: 2px 10px;
+            color: #4b5563;
+        }
+        .msg.assistant.md .md-hr { border: none; border-top: 1px solid #c7ccd1; margin: 8px 0; }
+        .msg.assistant.md a { color: #1d4ed8; }
+
+        .msg.system-note {
+            align-self: center;
+            background: transparent;
+            color: #9ca3af;
+            font-size: 12px;
+            padding: 2px 8px;
+        }
+        .msg .task-actions { margin-top: 8px; display: flex; gap: 8px; }
+        .result-table { border-collapse: collapse; margin-top: 6px; font-size: 13px; max-width: 100%; }
+        .result-table th, .result-table td {
+            border: 1px solid #c7ccd1;
+            padding: 5px 10px;
+            text-align: left;
+            vertical-align: top;
+        }
+        .result-table th { background: rgba(0, 0, 0, 0.05); font-weight: 600; }
+        .result-table td.answer { max-width: 420px; }
+        .chat-status-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .chat-status { font-size: 12px; color: #9ca3af; min-height: 15px; padding: 0 4px; }
+        .chat-status-row .btn { padding: 3px 12px; font-size: 12px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>Пакетный режим</h1>
+        <a class="nav-link" href="/index.html">← Обычный чат</a>
+    </div>
+
+    <div class="layout">
+        <div class="chat-column">
+            <div id="chat"></div>
+            <div class="chat-status-row">
+                <div id="chatStatus" class="chat-status"></div>
+                <button id="abortBtn" type="button" class="btn" style="display:none">Прервать</button>
+            </div>
+        </div>
+
+        <aside class="settings">
+            <div class="settings-title">Настройки</div>
+            <div class="settings-body">
+                <fieldset>
+                    <legend>Запрос (JSON)</legend>
+                    <input type="file" id="fileInput" accept=".json,application/json" style="display:none">
+                    <button id="loadFile" type="button" class="btn primary">Загрузить JSON-файл</button>
+                    <div class="hint" style="margin-top:6px">
+                        Формат: {"tasks": [{"name": "...", "messages": ["формулировка 1", ...],
+                        "expectedAnswer": "..." (необязательно),
+                        "settingsGroups": [{"name": "...", "settings": {...}}]}]}<br>
+                        Каждая формулировка выполняется с каждым набором настроек.
+                    </div>
+                    <div id="settingsStatus" class="settings-status"></div>
+                </fieldset>
+
+                <fieldset>
+                    <legend>Контекст диалога</legend>
+                    <label class="option">
+                        <input type="checkbox" id="useContext">
+                        <span>Сохранять контекст (у каждой задачи — свой)</span>
+                    </label>
+                    <div class="context-limit-row">
+                        <span>Лимит, токенов:</span>
+                        <input type="number" id="contextLimit" min="100" value="8000" disabled>
+                    </div>
+                    <span class="hint">При переполнении старые сообщения задачи заменяются сводкой от LLM.</span>
+                </fieldset>
+            </div>
+        </aside>
+    </div>
+</div>
+
+<script>
+    const chatEl = document.getElementById('chat');
+    const chatStatusEl = document.getElementById('chatStatus');
+    const settingsStatus = document.getElementById('settingsStatus');
+    const useContextEl = document.getElementById('useContext');
+    const contextLimitEl = document.getElementById('contextLimit');
+
+    useContextEl.addEventListener('change', () => {
+        contextLimitEl.disabled = !useContextEl.checked;
+    });
+
+    let statusTimer = null;
+    function showStatus(text, isError) {
+        settingsStatus.textContent = text;
+        settingsStatus.classList.toggle('error', !!isError);
+        clearTimeout(statusTimer);
+        statusTimer = setTimeout(() => { settingsStatus.textContent = ''; }, 5000);
+    }
+
+    function setChatStatus(text) {
+        chatStatusEl.textContent = text;
+    }
+
+    function escapeHtml(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function addMessage(text, role) {
+        const div = document.createElement('div');
+        div.className = 'msg ' + role;
+        div.textContent = text;
+        chatEl.appendChild(div);
+        chatEl.scrollTop = chatEl.scrollHeight;
+        return div;
+    }
+
+    // Minimal markdown renderer (same as on the main chat page): headings,
+    // lists, tables, code blocks, quotes, hr, inline code/bold/italic/links.
+    function renderMarkdown(src) {
+        const lines = String(src).replace(/\r\n/g, '\n').split('\n');
+        let html = '';
+        let para = [];
+        let i = 0;
+
+        const inline = (text) => {
+            let t = escapeHtml(text);
+            t = t.replace(/`([^`]+)`/g, '<code>$1</code>');
+            t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+            t = t.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+            t = t.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+            t = t.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
+                '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+            return t;
+        };
+        const flushPara = () => {
+            if (para.length) {
+                html += '<p>' + para.map(inline).join('<br>') + '</p>';
+                para = [];
+            }
+        };
+        const splitRow = (row) => row.trim().replace(/^\|/, '').replace(/\|$/, '')
+            .split('|').map(c => c.trim());
+
+        while (i < lines.length) {
+            const line = lines[i];
+
+            if (/^\s*```/.test(line)) { // fenced code block
+                flushPara();
+                const code = [];
+                i++;
+                while (i < lines.length && !/^\s*```/.test(lines[i])) { code.push(lines[i]); i++; }
+                i++; // closing fence
+                html += '<pre class="md-code"><code>' + escapeHtml(code.join('\n')) + '</code></pre>';
+                continue;
+            }
+
+            // table: a | row followed by a --- separator row
+            if (line.includes('|') && i + 1 < lines.length
+                    && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1]) && lines[i + 1].includes('-')) {
+                flushPara();
+                const headers = splitRow(line);
+                i += 2;
+                const rows = [];
+                while (i < lines.length && lines[i].includes('|') && lines[i].trim() !== '') {
+                    rows.push(splitRow(lines[i]));
+                    i++;
+                }
+                html += '<table class="md-table"><thead><tr>'
+                    + headers.map(h => '<th>' + inline(h) + '</th>').join('')
+                    + '</tr></thead><tbody>'
+                    + rows.map(r => '<tr>' + r.map(c => '<td>' + inline(c) + '</td>').join('') + '</tr>').join('')
+                    + '</tbody></table>';
+                continue;
+            }
+
+            const h = line.match(/^(#{1,4})\s+(.*)$/); // heading
+            if (h) {
+                flushPara();
+                html += '<div class="md-h md-h' + h[1].length + '">' + inline(h[2]) + '</div>';
+                i++;
+                continue;
+            }
+
+            if (/^\s*>\s?/.test(line)) { // blockquote
+                flushPara();
+                html += '<blockquote class="md-quote">' + inline(line.replace(/^\s*>\s?/, '')) + '</blockquote>';
+                i++;
+                continue;
+            }
+
+            if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) { // horizontal rule
+                flushPara();
+                html += '<hr class="md-hr">';
+                i++;
+                continue;
+            }
+
+            if (/^\s*([-*+]|\d+\.)\s+/.test(line)) { // list
+                flushPara();
+                const ordered = /^\s*\d+\./.test(line);
+                const items = [];
+                while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
+                    items.push(lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, ''));
+                    i++;
+                }
+                const tag = ordered ? 'ol' : 'ul';
+                html += '<' + tag + ' class="md-list">'
+                    + items.map(it => '<li>' + inline(it) + '</li>').join('')
+                    + '</' + tag + '>';
+                continue;
+            }
+
+            if (line.trim() === '') { flushPara(); i++; continue; }
+            para.push(line);
+            i++;
+        }
+        flushPara();
+        return html;
+    }
+
+    // ----- JSON upload -----
+    let pendingTasks = null;
+
+    document.getElementById('loadFile').addEventListener('click', () => {
+        document.getElementById('fileInput').click();
+    });
+
+    document.getElementById('fileInput').addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        e.target.value = '';
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+            try {
+                pendingTasks = validateTasks(JSON.parse(reader.result));
+            } catch (err) {
+                pendingTasks = null;
+                showStatus('Ошибка: ' + err.message, true);
+                addMessage('Файл не принят: ' + err.message, 'error');
+                return;
+            }
+            showStatus('Загружено задач: ' + pendingTasks.length);
+            const runs = pendingTasks.reduce((n, t) => n + t.messages.length * t.settingsGroups.length, 0);
+            askConfirmation(pendingTasks.length, runs);
+        };
+        reader.onerror = () => showStatus('Не удалось прочитать файл', true);
+        reader.readAsText(file);
+    });
+
+    function validateTasks(json) {
+        const tasks = Array.isArray(json) ? json : json.tasks;
+        if (!Array.isArray(tasks) || tasks.length === 0) {
+            throw new Error('ожидается непустой массив tasks');
+        }
+        return tasks.map((t, i) => {
+            const where = 'задача №' + (i + 1);
+            if (!t || typeof t !== 'object') throw new Error(where + ': не объект');
+            if (typeof t.name !== 'string' || !t.name.trim()) throw new Error(where + ': пустое поле name');
+
+            // Query phrasings: "messages" (array) or legacy single "message"
+            let messages;
+            if (t.messages !== undefined) {
+                if (!Array.isArray(t.messages) || t.messages.length === 0) {
+                    throw new Error(where + ': messages должен быть непустым массивом строк');
+                }
+                t.messages.forEach((m, j) => {
+                    if (typeof m !== 'string' || !m.trim()) {
+                        throw new Error(where + ', формулировка №' + (j + 1) + ': пустая строка');
+                    }
+                });
+                messages = t.messages.map(m => m.trim());
+            } else if (typeof t.message === 'string' && t.message.trim()) {
+                messages = [t.message.trim()];
+            } else {
+                throw new Error(where + ': нужны messages (массив) или message (строка)');
+            }
+
+            if (t.expectedAnswer !== undefined && typeof t.expectedAnswer !== 'string') {
+                throw new Error(where + ': expectedAnswer должен быть строкой');
+            }
+
+            // Settings groups: [{name, settings}...]. Legacy single "settings"
+            // object is wrapped into one unnamed group.
+            let groups;
+            if (t.settingsGroups !== undefined) {
+                if (!Array.isArray(t.settingsGroups) || t.settingsGroups.length === 0) {
+                    throw new Error(where + ': settingsGroups должен быть непустым массивом');
+                }
+                groups = t.settingsGroups.map((g, j) => {
+                    const gWhere = where + ', группа №' + (j + 1);
+                    if (!g || typeof g !== 'object') throw new Error(gWhere + ': не объект');
+                    if (typeof g.name !== 'string' || !g.name.trim()) {
+                        throw new Error(gWhere + ': пустое поле name');
+                    }
+                    if (g.settings !== undefined && (typeof g.settings !== 'object' || g.settings === null)) {
+                        throw new Error(gWhere + ': settings должен быть объектом');
+                    }
+                    return { name: g.name.trim(), settings: g.settings || {} };
+                });
+            } else {
+                if (t.settings !== undefined && (typeof t.settings !== 'object' || t.settings === null)) {
+                    throw new Error(where + ': settings должен быть объектом');
+                }
+                groups = [{ name: 'по умолчанию', settings: t.settings || {} }];
+            }
+            return { name: t.name.trim(), messages,
+                expectedAnswer: (t.expectedAnswer || '').trim(), settingsGroups: groups };
+        });
+    }
+
+    function askConfirmation(count, runs) {
+        const div = document.createElement('div');
+        div.className = 'msg assistant';
+        div.textContent = 'Выполнить запрос? Задач: ' + count
+            + (runs > count ? ' (выполнений с учётом формулировок и наборов настроек: ' + runs + ')' : '');
+        const actions = document.createElement('div');
+        actions.className = 'task-actions';
+        const yes = document.createElement('button');
+        yes.className = 'btn primary';
+        yes.textContent = 'Да';
+        const no = document.createElement('button');
+        no.className = 'btn';
+        no.textContent = 'Отмена';
+        actions.appendChild(yes);
+        actions.appendChild(no);
+        div.appendChild(actions);
+        chatEl.appendChild(div);
+        chatEl.scrollTop = chatEl.scrollHeight;
+
+        yes.addEventListener('click', () => {
+            actions.remove();
+            const tasks = pendingTasks;
+            pendingTasks = null;
+            runTasks(tasks);
+        });
+        no.addEventListener('click', () => {
+            actions.remove();
+            pendingTasks = null;
+            div.textContent = 'Выполнение отменено. Задач было: ' + count;
+            showStatus('Отменено');
+        });
+    }
+
+    // ----- Batch execution: parallel worker pool, abortable -----
+    const PARALLEL_WORKERS = 5;
+    let running = false;
+    let aborted = false;
+    let abortController = null;
+    const abortBtn = document.getElementById('abortBtn');
+
+    abortBtn.addEventListener('click', () => {
+        if (!running || aborted) return;
+        aborted = true;
+        abortBtn.disabled = true;
+        abortBtn.textContent = 'Прерывание…';
+        if (abortController) abortController.abort();
+        setChatStatus('Прерывание: жду завершения активных запросов…');
+    });
+
+    async function runTasks(tasks) {
+        if (running) return;
+        running = true;
+        aborted = false;
+        abortController = new AbortController();
+        abortBtn.style.display = '';
+        abortBtn.disabled = false;
+        abortBtn.textContent = 'Прервать';
+        document.getElementById('loadFile').disabled = true;
+
+        const runs = [];
+        for (const task of tasks) {
+            for (let v = 0; v < task.messages.length; v++) {
+                for (const group of task.settingsGroups) {
+                    runs.push({ task, message: task.messages[v], v, group });
+                }
+            }
+        }
+        addMessage('Запускаю выполнение: задач ' + tasks.length + ', выполнений ' + runs.length
+            + ', параллельно до ' + PARALLEL_WORKERS
+            + (useContextEl.checked ? ', контекст включён (лимит '
+                + (parseInt(contextLimitEl.value, 10) || 8000) + ' токенов)' : ', контекст выключен'),
+            'system-note');
+
+        const results = new Array(runs.length);
+        let nextIndex = 0, finished = 0;
+        const worker = async () => {
+            while (nextIndex < runs.length && !aborted) {
+                const i = nextIndex++;
+                const { task, message, v, group } = runs[i];
+                results[i] = await runTask(task, message, v, group, abortController.signal);
+                finished++;
+                setChatStatus((aborted ? 'Прерывание: ' : 'Выполнено ') + finished
+                    + ' из ' + runs.length + '…');
+            }
+        };
+        const workers = [];
+        for (let w = 0; w < Math.min(PARALLEL_WORKERS, runs.length); w++) workers.push(worker());
+        await Promise.all(workers);
+
+        const done = results.filter(r => r);
+        if (aborted) {
+            setChatStatus('Прервано: выполнено ' + done.filter(r => !r.cancelled).length
+                + ' из ' + runs.length);
+        } else {
+            setChatStatus('Готово: ' + runs.length + ' выполнений');
+        }
+        if (done.length) {
+            showResults(done);
+        } else {
+            addMessage('Выполнение прервано до получения результатов.', 'system-note');
+        }
+        running = false;
+        document.getElementById('loadFile').disabled = false;
+        abortBtn.style.display = 'none';
+    }
+
+    async function runTask(task, message, variationIndex, group, signal) {
+        const label = task.name
+            + (task.messages.length > 1 ? ' [вариант ' + (variationIndex + 1) + ']' : '')
+            + ' [' + group.name + ']';
+        const progress = addMessage('Выполнение «' + label + '»…', 'system-note');
+        const started = performance.now();
+        // Context keys are owned by this page's settings, not by the task
+        const settings = { ...group.settings };
+        delete settings.useContext;
+        delete settings.contextUnit;
+        delete settings.contextLimit;
+        delete settings.contextStrategy;
+        const payload = { message: message, ...settings };
+        if (useContextEl.checked) {
+            payload.useContext = true;
+            const limit = parseInt(contextLimitEl.value, 10);
+            if (Number.isInteger(limit) && limit > 0) payload.contextLimit = limit;
+        }
+        // No conversationId is passed: the server creates a fresh conversation
+        // per task — every task runs in its own isolated context.
+
+        let conversationId = null;
+        let replyText = '';
+        let doneData = null;
+        let errorText = null;
+        try {
+            const resp = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                signal
+            });
+            if (!resp.ok) {
+                const data = await resp.json().catch(() => ({}));
+                throw new Error(data.error || ('HTTP ' + resp.status));
+            }
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                let idx;
+                while ((idx = buffer.indexOf('\n\n')) >= 0) {
+                    const frame = parseSseEvent(buffer.slice(0, idx));
+                    buffer = buffer.slice(idx + 2);
+                    if (!frame) continue;
+                    if (frame.event === 'token') {
+                        replyText += JSON.parse(frame.data).text;
+                    } else if (frame.event === 'conversation') {
+                        conversationId = JSON.parse(frame.data).id;
+                    } else if (frame.event === 'done') {
+                        doneData = JSON.parse(frame.data);
+                    } else if (frame.event === 'error') {
+                        throw new Error(JSON.parse(frame.data).error || 'Ошибка генерации');
+                    }
+                }
+            }
+        } catch (e) {
+            if (e && e.name === 'AbortError') {
+                const elapsedMs = Math.round(performance.now() - started);
+                progress.textContent = 'Выполнение «' + label + '»: прервано';
+                return { taskName: task.name, groupName: group.name, expected: task.expectedAnswer,
+                    variation: task.messages.length > 1 ? 'вариант ' + (variationIndex + 1) : '',
+                    variationText: task.messages.length > 1 ? message : '',
+                    answer: '(прервано пользователем)', elapsedMs, tokens: null, cancelled: true };
+            }
+            errorText = e.message;
+        } finally {
+            // The per-task conversation has served its purpose — clean it up
+            if (conversationId) {
+                try {
+                    await fetch('/api/conversations?id=' + encodeURIComponent(conversationId),
+                        { method: 'DELETE' });
+                } catch (e) { /* best effort */ }
+            }
+        }
+
+        const elapsedMs = Math.round(performance.now() - started);
+        if (errorText) {
+            progress.textContent = 'Выполнение «' + label + '»: ошибка — ' + errorText;
+            progress.classList.remove('system-note');
+            progress.classList.add('error');
+            return { taskName: task.name, groupName: group.name, expected: task.expectedAnswer,
+                variation: task.messages.length > 1 ? 'вариант ' + (variationIndex + 1) : '',
+                variationText: task.messages.length > 1 ? message : '',
+                answer: 'Ошибка: ' + errorText, elapsedMs, tokens: null };
+        }
+        if (!replyText && doneData && doneData.reply) replyText = doneData.reply;
+        const stats = doneData && doneData.stats ? doneData.stats : {};
+        const tokens = (stats.totalTokens != null ? stats.totalTokens
+            : (stats.promptTokens || 0) + (stats.completionTokens || 0)) + (stats.auxTokens || 0);
+        progress.textContent = 'Выполнение «' + label + '»: готово ('
+            + (elapsedMs / 1000).toFixed(1) + ' с, ' + tokens + ' токенов)';
+        return { taskName: task.name, groupName: group.name, expected: task.expectedAnswer,
+            variation: task.messages.length > 1 ? 'вариант ' + (variationIndex + 1) : '',
+            variationText: task.messages.length > 1 ? message : '',
+            answer: replyText || '(пустой ответ)', elapsedMs, tokens };
+    }
+
+    function parseSseEvent(raw) {
+        let event = 'message', data = '';
+        for (const line of raw.split('\n')) {
+            if (line.startsWith('event:')) event = line.slice(6).trim();
+            else if (line.startsWith('data:')) data += (data ? '\n' : '') + line.slice(5).trim();
+        }
+        return data ? { event, data } : null;
+    }
+
+    // Compares the model answer with the expected one: exact substring match
+    // after normalization, or — when the expected answer contains numbers —
+    // all of them must be present in the answer (robust for numeric puzzles).
+    function matchesExpected(answer, expected) {
+        const norm = (s) => String(s).toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim();
+        const a = norm(answer), e = norm(expected);
+        if (!e) return null;
+        if (a.includes(e)) return true;
+        const nums = e.match(/\d+/g);
+        if (nums && nums.length) return nums.every(n => a.includes(n));
+        return false;
+    }
+
+    // ----- Result: one chat message with a table -----
+    function showResults(results) {
+        const div = document.createElement('div');
+        div.className = 'msg assistant';
+        div.style.whiteSpace = 'normal';
+        div.textContent = 'Результаты выполнения (' + results.length + ' выполнений):';
+
+        const table = document.createElement('table');
+        table.className = 'result-table';
+        const hasExpected = results.some(r => r.expected);
+        const hasVariations = results.some(r => r.variation);
+        const columns = ['Задача'];
+        if (hasVariations) columns.push('Вариация');
+        columns.push('Набор настроек');
+        if (hasExpected) columns.push('Ожидаемый ответ');
+        columns.push('Ответ', 'Время', 'Токены');
+        const head = document.createElement('tr');
+        for (const title of columns) {
+            const th = document.createElement('th');
+            th.textContent = title;
+            head.appendChild(th);
+        }
+        table.appendChild(head);
+        let totalMs = 0, totalTokens = 0;
+        for (const r of results) {
+            totalMs += r.elapsedMs;
+            if (r.tokens != null) totalTokens += r.tokens;
+            const tr = document.createElement('tr');
+            const tdName = document.createElement('td');
+            tdName.textContent = r.taskName;
+            const tds = [tdName];
+            if (hasVariations) {
+                const tdVar = document.createElement('td');
+                tdVar.textContent = r.variation || '—';
+                if (r.variationText) tdVar.title = r.variationText;
+                tds.push(tdVar);
+            }
+            const tdGroup = document.createElement('td');
+            tdGroup.textContent = r.groupName;
+            tds.push(tdGroup);
+            if (hasExpected) {
+                const tdExpected = document.createElement('td');
+                tdExpected.textContent = r.expected || '—';
+                tds.push(tdExpected);
+            }
+            const tdAnswer = document.createElement('td');
+            tdAnswer.className = 'answer';
+            tdAnswer.textContent = r.answer;
+            const tdTime = document.createElement('td');
+            tdTime.textContent = (r.elapsedMs / 1000).toFixed(1) + ' с';
+            const tdTokens = document.createElement('td');
+            tdTokens.textContent = r.tokens != null ? r.tokens : '—';
+            tds.push(tdAnswer, tdTime, tdTokens);
+            tr.append(...tds);
+            table.appendChild(tr);
+        }
+        const foot = document.createElement('tr');
+        const f1 = document.createElement('td');
+        f1.innerHTML = '<strong>Итого</strong>';
+        foot.appendChild(f1);
+        for (let i = 0; i < columns.length - 3; i++) {
+            foot.appendChild(document.createElement('td'));
+        }
+        const fTime = document.createElement('td');
+        fTime.innerHTML = '<strong>' + (totalMs / 1000).toFixed(1) + ' с</strong>';
+        const fTokens = document.createElement('td');
+        fTokens.innerHTML = '<strong>' + totalTokens + '</strong>';
+        foot.append(fTime, fTokens);
+        table.appendChild(foot);
+        div.appendChild(table);
+        const analyzeBtn = document.createElement('button');
+        analyzeBtn.type = 'button';
+        analyzeBtn.className = 'btn primary';
+        analyzeBtn.style.marginTop = '10px';
+        analyzeBtn.textContent = 'Анализ результирующей таблицы';
+        analyzeBtn.addEventListener('click', () => analyzeResults(results, analyzeBtn));
+        div.appendChild(analyzeBtn);
+        chatEl.appendChild(div);
+        chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    // ----- LLM analysis of the result table -----
+    async function analyzeResults(results, btn) {
+        btn.disabled = true;
+        btn.textContent = 'Анализ выполняется…';
+        // ----- Aggregate statistics only: per settings group and per variation -----
+        const fmtS = (ms) => (ms / 1000).toFixed(1) + ' с';
+        const aggregate = (keyFn) => {
+            const map = new Map();
+            for (const r of results) {
+                const key = keyFn(r);
+                if (!key) continue;
+                if (!map.has(key)) {
+                    map.set(key, { runs: 0, checked: 0, correct: 0,
+                        timeMs: [], tokens: [] });
+                }
+                const s = map.get(key);
+                s.runs++;
+                if (r.expected) {
+                    const m = matchesExpected(r.answer, r.expected);
+                    if (m !== null) { s.checked++; if (m) s.correct++; }
+                }
+                s.timeMs.push(r.elapsedMs);
+                if (r.tokens != null) s.tokens.push(r.tokens);
+            }
+            const lines = [];
+            for (const [key, s] of map) {
+                const avgMs = s.timeMs.reduce((a, b) => a + b, 0) / s.timeMs.length;
+                const minMs = Math.min(...s.timeMs);
+                const maxMs = Math.max(...s.timeMs);
+                let line = '«' + key + '»: выполнений ' + s.runs;
+                if (s.checked > 0) {
+                    line += ', точность ' + s.correct + '/' + s.checked
+                        + ' (' + Math.round(100 * s.correct / s.checked) + '%)';
+                } else {
+                    line += ', точность не проверялась (нет эталонных ответов)';
+                }
+                line += ', время среднее ' + fmtS(avgMs) + ' (мин ' + fmtS(minMs)
+                    + ', макс ' + fmtS(maxMs) + ')';
+                if (s.tokens.length) {
+                    const avgTok = s.tokens.reduce((a, b) => a + b, 0) / s.tokens.length;
+                    line += ', токены среднее ' + Math.round(avgTok)
+                        + ' (мин ' + Math.min(...s.tokens)
+                        + ', макс ' + Math.max(...s.tokens) + ')';
+                }
+                lines.push(line);
+            }
+            return lines;
+        };
+        const hasExpected = results.some(r => r.expected);
+        const hasVariations = results.some(r => r.variation);
+
+        // Wrong answers: compact list for the error table (answer truncated)
+        const wrong = [];
+        for (const r of results) {
+            if (!r.expected) continue;
+            const m = matchesExpected(r.answer, r.expected);
+            if (m === false) {
+                wrong.push('Задача «' + r.taskName + '»'
+                    + (r.variation ? ', ' + r.variation : '')
+                    + ', набор «' + r.groupName + '»'
+                    + ': ожидалось «' + r.expected + '», получено «'
+                    + (r.answer.length > 200 ? r.answer.slice(0, 200) + '…' : r.answer)
+                        .replace(/\n/g, ' ') + '»');
+            }
+        }
+
+        const prompt = 'Ты — аналитик качества LLM. Ниже — агрегированная статистика пакетного '
+            + 'прогона задач через языковую модель: ' + results.length + ' выполнений'
+            + (hasExpected ? ' (точность проверена автоматически '
+                + 'сравнением с эталонным ответом)' : '')
+            + '.\n\nСтатистика по наборам настроек:\n'
+            + aggregate(r => r.groupName).join('\n')
+            + (hasVariations
+                ? '\n\nСтатистика по вариациям формулировки запросов:\n'
+                    + aggregate(r => r.variation).join('\n')
+                : '')
+            + (wrong.length
+                ? '\n\nОшибочные ответы (' + wrong.length + '):\n' + wrong.join('\n')
+                : hasExpected ? '\n\nОшибочных ответов нет — все совпали с эталоном.' : '')
+            + '\n\nСделай КРАТКИЙ анализ на русском языке. Формат ответа — строго:\n'
+            + '1. Таблица «Сравнение наборов настроек»: колонки — набор, точность, '
+            + 'среднее время, средние токены, краткий вывод (1 строка на набор).\n'
+            + (hasVariations
+                ? '2. Таблица «Влияние формулировки запроса»: колонки — вариация, '
+                    + 'точность, среднее время, средние токены, краткий вывод.\n'
+                : '')
+            + (hasVariations ? '3' : '2') + '. Таблица «Ошибки ответов»: колонки — задача, '
+            + 'набор настроек, ожидалось, получено, краткое описание причины ошибки '
+            + '(почему ответ неверен). Если ошибок нет — так и напиши одной строкой.\n'
+            + (hasVariations ? '4' : '3') + '. «Выводы»: 2–4 маркера — какие настройки '
+            + 'и формулировки лучше.\n'
+            + 'Будь краток, без длинных рассуждений, только таблицы и выводы.';
+
+        const progress = addMessage('Анализ результирующей таблицы…', 'system-note');
+        const answerDiv = document.createElement('div');
+        answerDiv.className = 'msg assistant md';
+        chatEl.appendChild(answerDiv);
+        chatEl.scrollTop = chatEl.scrollHeight;
+
+        let conversationId = null;
+        let replyText = '';
+        try {
+            const resp = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: prompt })
+            });
+            if (!resp.ok) {
+                const data = await resp.json().catch(() => ({}));
+                throw new Error(data.error || ('HTTP ' + resp.status));
+            }
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                let idx;
+                while ((idx = buffer.indexOf('\n\n')) >= 0) {
+                    const frame = parseSseEvent(buffer.slice(0, idx));
+                    buffer = buffer.slice(idx + 2);
+                    if (!frame) continue;
+                    if (frame.event === 'token') {
+                        replyText += JSON.parse(frame.data).text;
+                        answerDiv.innerHTML = renderMarkdown(replyText);
+                        chatEl.scrollTop = chatEl.scrollHeight;
+                    } else if (frame.event === 'conversation') {
+                        conversationId = JSON.parse(frame.data).id;
+                    } else if (frame.event === 'done') {
+                        const d = JSON.parse(frame.data);
+                        if (!replyText && d.reply) {
+                            replyText = d.reply;
+                        }
+                        answerDiv.innerHTML = renderMarkdown(replyText);
+                    } else if (frame.event === 'error') {
+                        throw new Error(JSON.parse(frame.data).error || 'Ошибка генерации');
+                    }
+                }
+            }
+            progress.remove();
+            if (!replyText) answerDiv.textContent = '(пустой ответ)';
+        } catch (e) {
+            progress.textContent = 'Анализ результирующей таблицы: ошибка — ' + e.message;
+            progress.classList.remove('system-note');
+            progress.classList.add('error');
+            answerDiv.remove();
+        } finally {
+            if (conversationId) {
+                try {
+                    await fetch('/api/conversations?id=' + encodeURIComponent(conversationId),
+                        { method: 'DELETE' });
+                } catch (e) { /* best effort */ }
+            }
+            btn.disabled = false;
+            btn.textContent = 'Анализ результирующей таблицы';
+        }
+    }
+
+    // ----- Frontend error logging -----
+    window.addEventListener('error', (e) => {
+        addMessage('Ошибка интерфейса: ' + e.message, 'error');
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+        const reason = e.reason instanceof Error ? e.reason.message : String(e.reason);
+        addMessage('Ошибка интерфейса: необработанный Promise: ' + reason, 'error');
+    });
+
+    setChatStatus('Загрузите JSON-файл с задачами');
+</script>
+</body>
+</html>

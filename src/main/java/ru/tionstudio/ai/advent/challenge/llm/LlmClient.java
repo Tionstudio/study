@@ -31,6 +31,10 @@ import java.util.logging.Logger;
  */
 public class LlmClient {
 
+    /** A single chat message (role: system | user | assistant). */
+    public record Message(String role, String content) {
+    }
+
     /**
      * Per-request generation options chosen in the web UI settings frame.
      *
@@ -90,16 +94,16 @@ public class LlmClient {
     }
 
     /**
-     * Sends a single user message to the LLM in streaming mode: every content
-     * token is passed to {@code tokenConsumer} and every reasoning token
-     * (hidden "thinking" of reasoning models) to {@code reasoningConsumer}
-     * as soon as it arrives.
+     * Sends a message list (history + new user message) to the LLM in streaming
+     * mode: every content token is passed to {@code tokenConsumer} and every
+     * reasoning token (hidden "thinking" of reasoning models) to
+     * {@code reasoningConsumer} as soon as it arrives.
      *
      * @return the accumulated reply together with token usage statistics
      * @throws IOException          on network errors or non-2xx API responses
      * @throws InterruptedException if the request is interrupted
      */
-    public ChatResult chatStream(String userMessage, ChatOptions options,
+    public ChatResult chatStream(List<Message> messagesToSend, ChatOptions options,
                                  Consumer<String> tokenConsumer, Consumer<String> reasoningConsumer)
             throws IOException, InterruptedException {
         ObjectNode payload = MAPPER.createObjectNode();
@@ -113,7 +117,9 @@ public class LlmClient {
         if (systemPrompt != null) {
             messages.addObject().put("role", "system").put("content", systemPrompt);
         }
-        messages.addObject().put("role", "user").put("content", userMessage);
+        for (Message m : messagesToSend) {
+            messages.addObject().put("role", m.role()).put("content", m.content());
+        }
 
         if (options.maxTokens() != null && options.maxTokens() > 0) {
             payload.put("max_tokens", options.maxTokens());
@@ -126,6 +132,9 @@ public class LlmClient {
             payload.put("reasoning_effort", options.reasoningEffort());
         }
 
+        String lastMessage = messagesToSend.isEmpty()
+                ? ""
+                : messagesToSend.get(messagesToSend.size() - 1).content();
         LOG.info(() -> "LLM request (stream): model=" + model
                 + ", format=" + options.format()
                 + (systemPrompt != null ? " (system prompt: " + systemPrompt.length() + " chars)" : " (no system prompt)")
@@ -134,7 +143,8 @@ public class LlmClient {
                         ? ", stop=" + options.stopSequences() : "")
                 + (options.reasoningEffort() != null && !options.reasoningEffort().isBlank()
                         ? ", reasoning_effort=" + options.reasoningEffort() : "")
-                + ", message=" + abbreviate(userMessage, 120));
+                + ", messages=" + messagesToSend.size()
+                + ", last=" + abbreviate(lastMessage, 120));
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(endpoint))
@@ -229,6 +239,15 @@ public class LlmClient {
                     + "(reasoning tokens consume the same budget). Increase max_tokens or use natural stop.");
         }
         return result;
+    }
+
+    /**
+     * Non-streaming convenience call: collects the full reply internally.
+     * Used for auxiliary requests like context summarization.
+     */
+    public ChatResult chatOnce(List<Message> messages, ChatOptions options)
+            throws IOException, InterruptedException {
+        return chatStream(messages, options, token -> { }, reasoningToken -> { });
     }
 
     private static String abbreviate(String text, int maxLength) {

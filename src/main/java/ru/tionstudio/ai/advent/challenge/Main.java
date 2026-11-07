@@ -1,6 +1,8 @@
 package ru.tionstudio.ai.advent.challenge;
 
 import ru.tionstudio.ai.advent.challenge.config.AppConfig;
+import ru.tionstudio.ai.advent.challenge.conversation.ConversationManager;
+import ru.tionstudio.ai.advent.challenge.conversation.ConversationStore;
 import ru.tionstudio.ai.advent.challenge.llm.LlmClient;
 import ru.tionstudio.ai.advent.challenge.presets.PresetStore;
 import ru.tionstudio.ai.advent.challenge.server.ChatServer;
@@ -24,8 +26,10 @@ public class Main {
             LOG.info("Configuration loaded from " + AppConfig.CONFIG_PATH.toAbsolutePath()
                     + " (model=" + config.model() + ", baseUrl=" + config.baseUrl() + ")");
             PresetStore presetStore = new PresetStore(Path.of("settings.db"));
+            ConversationStore conversationStore = new ConversationStore(Path.of("settings.db"));
             LlmClient llmClient = new LlmClient(config);
-            ChatServer server = new ChatServer(config.serverPort(), llmClient, presetStore);
+            ConversationManager conversationManager = new ConversationManager(conversationStore, llmClient);
+            ChatServer server = new ChatServer(config.serverPort(), llmClient, presetStore, conversationManager);
             server.start();
         } catch (Exception e) {
             LOG.severe("Failed to start: " + e.getMessage());

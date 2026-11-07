@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import ru.tionstudio.ai.advent.challenge.conversation.ConversationManager;
+import ru.tionstudio.ai.advent.challenge.conversation.ConversationStore;
 import ru.tionstudio.ai.advent.challenge.llm.LlmClient;
 import ru.tionstudio.ai.advent.challenge.llm.ResponseParser;
 import ru.tionstudio.ai.advent.challenge.presets.PresetStore;
@@ -60,17 +62,21 @@ public class ChatServer {
     private final int port;
     private final LlmClient llmClient;
     private final PresetStore presetStore;
+    private final ConversationManager conversationManager;
 
-    public ChatServer(int port, LlmClient llmClient, PresetStore presetStore) {
+    public ChatServer(int port, LlmClient llmClient, PresetStore presetStore,
+                      ConversationManager conversationManager) {
         this.port = port;
         this.llmClient = llmClient;
         this.presetStore = presetStore;
+        this.conversationManager = conversationManager;
     }
 
     public void start() throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/api/chat", this::handleChat);
         server.createContext("/api/presets", this::handlePresets);
+        server.createContext("/api/conversations", this::handleConversations);
         server.createContext("/", this::handleStatic);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.start();
@@ -94,6 +100,8 @@ public class ChatServer {
             }
 
             LlmClient.ChatOptions options = parseOptions(json);
+            ConversationManager.ContextSettings contextSettings =
+                    ConversationManager.ContextSettings.parse(json);
 
             // Server-Sent Events: tokens are pushed to the page as they arrive
             exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
@@ -119,10 +127,32 @@ public class ChatServer {
                 }, HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_INTERVAL_SECONDS, TimeUnit.SECONDS);
 
                 try {
+                    // Context mode: register the message, fit history into the
+                    // configured limit, maybe compress the overflow (the
+                    // summarization LLM call happens here, under the heartbeat).
+                    ConversationManager.Prepared prepared = conversationManager.prepare(
+                            json.path("conversationId").asText(null), message, contextSettings);
+                    if (prepared.conversationId() != null) {
+                        ObjectNode convJson = MAPPER.createObjectNode();
+                        convJson.put("id", prepared.conversationId());
+                        synchronized (out) {
+                            writeSse(out, "conversation", convJson.toString());
+                        }
+                        if (prepared.compressed()) {
+                            ObjectNode ctxJson = MAPPER.createObjectNode();
+                            ctxJson.put("keptMessages", prepared.keptMessages());
+                            ctxJson.put("totalMessages", prepared.totalMessages());
+                            ctxJson.put("summary", prepared.summaryUsed());
+                            synchronized (out) {
+                                writeSse(out, "context", ctxJson.toString());
+                            }
+                        }
+                    }
+
                     LlmClient.ChatResult result;
                     long startNanos = System.nanoTime();
                     try {
-                        result = llmClient.chatStream(message, options, token -> {
+                        result = llmClient.chatStream(prepared.messages(), options, token -> {
                             try {
                                 ObjectNode tokenJson = MAPPER.createObjectNode();
                                 tokenJson.put("text", token);
@@ -160,10 +190,26 @@ public class ChatServer {
                     }
                     long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
 
+                    // Context mode: store the assistant's reply in the history
+                    conversationManager.onReply(prepared.conversationId(), result.reply());
+
                     ObjectNode doneJson = MAPPER.createObjectNode();
                     doneJson.put("reply", result.reply());
                     doneJson.set("applied", appliedJson(options));
-                    doneJson.set("stats", statsJson(result, elapsedMs));
+                    ObjectNode statsNode = statsJson(result, elapsedMs);
+                    if (prepared.auxTokens() > 0) {
+                        // Tokens spent on the auxiliary summarization call
+                        statsNode.put("auxTokens", prepared.auxTokens());
+                    }
+                    doneJson.set("stats", statsNode);
+                    if (prepared.conversationId() != null) {
+                        ObjectNode ctxJson = MAPPER.createObjectNode();
+                        ctxJson.put("keptMessages", prepared.keptMessages());
+                        ctxJson.put("totalMessages", prepared.totalMessages());
+                        ctxJson.put("summaryChars", prepared.summaryChars());
+                        ctxJson.put("fillPercent", prepared.fillPercent());
+                        doneJson.set("context", ctxJson);
+                    }
 
                     // Optional reply post-processing ("Парсинг ответа" settings section)
                     String parseMode = json.path("parseMode").asText("none");
@@ -256,6 +302,59 @@ public class ChatServer {
         } catch (Exception e) {
             LOG.log(Level.SEVERE, "Presets request failed", e);
             sendQuietly(exchange, 500, errorJson("Presets request failed: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * {@code GET /api/conversations?id=...} — returns the stored conversation
+     * so the page can restore the chat after a reload.
+     * {@code DELETE /api/conversations?id=...} — removes the conversation
+     * ("Новый диалог" button).
+     */
+    private void handleConversations(HttpExchange exchange) throws IOException {
+        try {
+            String id = null;
+            String rawQuery = exchange.getRequestURI().getRawQuery();
+            if (rawQuery != null) {
+                for (String pair : rawQuery.split("&")) {
+                    int eq = pair.indexOf('=');
+                    if (eq > 0 && pair.substring(0, eq).equals("id")) {
+                        id = java.net.URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
+                    }
+                }
+            }
+            if (id == null || id.isBlank()) {
+                sendJson(exchange, 400, errorJson("Query parameter 'id' is required."));
+                return;
+            }
+            switch (exchange.getRequestMethod().toUpperCase()) {
+                case "GET" -> {
+                    ConversationStore.Conversation conv = conversationManager.load(id);
+                    if (conv == null) {
+                        sendJson(exchange, 404, errorJson("Conversation not found: id=" + id));
+                        return;
+                    }
+                    ObjectNode root = MAPPER.createObjectNode();
+                    root.put("id", conv.id());
+                    root.put("hasSummary", !conv.summary().isBlank());
+                    var arr = root.putArray("messages");
+                    for (ConversationStore.StoredMessage m : conv.messages()) {
+                        arr.addObject().put("role", m.role()).put("content", m.content());
+                    }
+                    sendJson(exchange, 200, root.toString());
+                }
+                case "DELETE" -> {
+                    if (conversationManager.delete(id)) {
+                        sendJson(exchange, 200, "{\"deleted\":true}");
+                    } else {
+                        sendJson(exchange, 404, errorJson("Conversation not found: id=" + id));
+                    }
+                }
+                default -> sendJson(exchange, 405, errorJson("Method not allowed."));
+            }
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "Conversations request failed", e);
+            sendQuietly(exchange, 500, errorJson("Conversations request failed: " + e.getMessage()));
         }
     }
 
