@@ -61,13 +61,15 @@ public class ChatServer {
 
     private final int port;
     private final LlmClient llmClient;
+    private final LlmClient cloudLlmClient; // may be null when cloud is not configured
     private final PresetStore presetStore;
     private final ConversationManager conversationManager;
 
-    public ChatServer(int port, LlmClient llmClient, PresetStore presetStore,
-                      ConversationManager conversationManager) {
+    public ChatServer(int port, LlmClient llmClient, LlmClient cloudLlmClient,
+                      PresetStore presetStore, ConversationManager conversationManager) {
         this.port = port;
         this.llmClient = llmClient;
+        this.cloudLlmClient = cloudLlmClient;
         this.presetStore = presetStore;
         this.conversationManager = conversationManager;
     }
@@ -102,6 +104,20 @@ public class ChatServer {
             LlmClient.ChatOptions options = parseOptions(json);
             ConversationManager.ContextSettings contextSettings =
                     ConversationManager.ContextSettings.parse(json);
+
+            // Requests can explicitly demand the cloud model (useCloud=true),
+            // e.g. batch-result analysis must run on the cloud even when the
+            // primary provider is a local server.
+            boolean useCloud = json.path("useCloud").asBoolean(false);
+            LlmClient client = llmClient;
+            if (useCloud) {
+                if (cloudLlmClient == null) {
+                    sendJson(exchange, 400, errorJson(
+                            "Облачный провайдер не настроен (llm.api.key отсутствует в config.properties)."));
+                    return;
+                }
+                client = cloudLlmClient;
+            }
 
             // Server-Sent Events: tokens are pushed to the page as they arrive
             exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
@@ -152,7 +168,7 @@ public class ChatServer {
                     LlmClient.ChatResult result;
                     long startNanos = System.nanoTime();
                     try {
-                        result = llmClient.chatStream(prepared.messages(), options, token -> {
+                        result = client.chatStream(prepared.messages(), options, token -> {
                             try {
                                 ObjectNode tokenJson = MAPPER.createObjectNode();
                                 tokenJson.put("text", token);
@@ -425,7 +441,18 @@ public class ChatServer {
 
         String reasoningEffort = json.path("reasoningEffort").asText(null);
 
-        return new LlmClient.ChatOptions(format, formatDescription, maxTokens, stopSequences, reasoningEffort);
+        // Sampling temperature: sent only for models that support it
+        Double temperature = null;
+        JsonNode temperatureNode = json.path("temperature");
+        if (temperatureNode.isNumber()) {
+            double t = temperatureNode.asDouble();
+            if (t >= 0 && t <= 2) {
+                temperature = t;
+            }
+        }
+
+        return new LlmClient.ChatOptions(format, formatDescription, maxTokens, stopSequences,
+                reasoningEffort, temperature);
     }
 
     /**
@@ -446,6 +473,9 @@ public class ChatServer {
         }
         if (options.reasoningEffort() != null && !options.reasoningEffort().isBlank()) {
             applied.put("reasoningEffort", options.reasoningEffort());
+        }
+        if (options.temperature() != null) {
+            applied.put("temperature", options.temperature());
         }
         return applied;
     }

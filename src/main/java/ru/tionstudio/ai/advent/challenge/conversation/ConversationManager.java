@@ -223,7 +223,7 @@ public class ConversationManager {
                 + "зафиксируй темы, вопросы пользователя, важные факты, договорённости и выводы, "
                 + "нужные для продолжения разговора. Пиши только сводку, без комментариев.");
 
-        ChatOptions options = new ChatOptions("none", "", null, List.of(), "low");
+        ChatOptions options = new ChatOptions("none", "", null, List.of(), "low", null);
         LOG.info("Summarizing " + chunk.size() + " old messages for context compression");
         return llmClient.chatOnce(List.of(new Message("user", prompt.toString())), options);
     }

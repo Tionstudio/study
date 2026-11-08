@@ -24,12 +24,25 @@ public class Main {
         try {
             AppConfig config = AppConfig.load();
             LOG.info("Configuration loaded from " + AppConfig.CONFIG_PATH.toAbsolutePath()
-                    + " (model=" + config.model() + ", baseUrl=" + config.baseUrl() + ")");
+                    + " (provider=" + config.provider()
+                    + ", model=" + config.model() + ", baseUrl=" + config.baseUrl() + ")");
             PresetStore presetStore = new PresetStore(Path.of("settings.db"));
             ConversationStore conversationStore = new ConversationStore(Path.of("settings.db"));
             LlmClient llmClient = new LlmClient(config);
+            // Cloud client for features that must always run on the cloud model
+            // (e.g. batch-result analysis), even when the primary provider is local.
+            LlmClient cloudLlmClient = "cloud".equalsIgnoreCase(config.provider())
+                    ? llmClient
+                    : (config.hasCloudConfig()
+                            ? new LlmClient(config.cloudApiKey(), config.cloudBaseUrl(), config.cloudModel())
+                            : null);
+            if (cloudLlmClient == null) {
+                LOG.warning("Cloud LLM is not configured (llm.api.key missing) — "
+                        + "requests with useCloud=true will be rejected");
+            }
             ConversationManager conversationManager = new ConversationManager(conversationStore, llmClient);
-            ChatServer server = new ChatServer(config.serverPort(), llmClient, presetStore, conversationManager);
+            ChatServer server = new ChatServer(config.serverPort(), llmClient, cloudLlmClient,
+                    presetStore, conversationManager);
             server.start();
         } catch (Exception e) {
             LOG.severe("Failed to start: " + e.getMessage());

@@ -46,15 +46,18 @@ public class LlmClient {
      * @param stopSequences     custom stop sequences (may be empty)
      * @param reasoningEffort   reasoning depth for thinking models: low | high | max,
      *                          or null to use the provider default
+     * @param temperature       sampling temperature (0..2) or null to not send it
+     *                          (only applicable to models that support temperature)
      */
     public record ChatOptions(String format,
                               String formatDescription,
                               Integer maxTokens,
                               List<String> stopSequences,
-                              String reasoningEffort) {
+                              String reasoningEffort,
+                              Double temperature) {
 
         public static ChatOptions defaults() {
-            return new ChatOptions("none", "", null, List.of(), null);
+            return new ChatOptions("none", "", null, List.of(), null, null);
         }
     }
 
@@ -85,9 +88,13 @@ public class LlmClient {
     private final String model;
 
     public LlmClient(AppConfig config) {
-        this.apiKey = config.apiKey();
-        this.endpoint = config.baseUrl().replaceAll("/+$", "") + "/chat/completions";
-        this.model = config.model();
+        this(config.apiKey(), config.baseUrl(), config.model());
+    }
+
+    public LlmClient(String apiKey, String baseUrl, String model) {
+        this.apiKey = apiKey;
+        this.endpoint = baseUrl.replaceAll("/+$", "") + "/chat/completions";
+        this.model = model;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(15))
                 .build();
@@ -131,6 +138,9 @@ public class LlmClient {
         if (options.reasoningEffort() != null && !options.reasoningEffort().isBlank()) {
             payload.put("reasoning_effort", options.reasoningEffort());
         }
+        if (options.temperature() != null) {
+            payload.put("temperature", options.temperature());
+        }
 
         String lastMessage = messagesToSend.isEmpty()
                 ? ""
@@ -143,11 +153,15 @@ public class LlmClient {
                         ? ", stop=" + options.stopSequences() : "")
                 + (options.reasoningEffort() != null && !options.reasoningEffort().isBlank()
                         ? ", reasoning_effort=" + options.reasoningEffort() : "")
+                + (options.temperature() != null ? ", temperature=" + options.temperature() : "")
                 + ", messages=" + messagesToSend.size()
                 + ", last=" + abbreviate(lastMessage, 120));
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(endpoint))
+                // Force HTTP/1.1: the default HTTP/2 h2c upgrade stalls against
+                // some local OpenAI-compatible servers (LM Studio, llama.cpp)
+                .version(HttpClient.Version.HTTP_1_1)
                 .timeout(Duration.ofSeconds(120))
                 .header("Content-Type", "application/json")
                 .header("Authorization", "Bearer " + apiKey)

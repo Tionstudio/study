@@ -768,14 +768,66 @@
         analyzeBtn.className = 'btn primary';
         analyzeBtn.style.marginTop = '10px';
         analyzeBtn.textContent = 'Анализ результирующей таблицы';
-        analyzeBtn.addEventListener('click', () => analyzeResults(results, analyzeBtn));
-        div.appendChild(analyzeBtn);
+        const csvBtn = document.createElement('button');
+        csvBtn.type = 'button';
+        csvBtn.className = 'btn';
+        csvBtn.style.marginTop = '10px';
+        csvBtn.style.marginLeft = '8px';
+        csvBtn.textContent = 'Экспорт CSV';
+        csvBtn.addEventListener('click', () => exportResultsCsv(results));
+        const mdBtn = document.createElement('button');
+        mdBtn.type = 'button';
+        mdBtn.className = 'btn';
+        mdBtn.style.marginTop = '10px';
+        mdBtn.style.marginLeft = '8px';
+        mdBtn.textContent = 'Экспорт анализа (MD)';
+        mdBtn.disabled = true; // becomes enabled once an analysis completes
+        mdBtn.addEventListener('click', () => {
+            if (mdBtn.dataset.md) {
+                downloadFile('batch-analysis.md', mdBtn.dataset.md, 'text/markdown');
+            }
+        });
+        analyzeBtn.addEventListener('click', () => analyzeResults(results, analyzeBtn, mdBtn));
+        div.append(analyzeBtn, csvBtn, mdBtn);
         chatEl.appendChild(div);
         chatEl.scrollTop = chatEl.scrollHeight;
     }
 
+    // ----- File export helpers -----
+    function downloadFile(filename, content, mime) {
+        // BOM makes Excel/opening apps detect UTF-8 correctly
+        const blob = new Blob(['﻿' + content],
+            { type: (mime || 'text/plain') + ';charset=utf-8' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = filename;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    }
+
+    // Result table as CSV (';' delimiter + quoting — opens correctly in Russian Excel)
+    function exportResultsCsv(results) {
+        const esc = (v) => {
+            const s = v == null ? '' : String(v);
+            return /[";\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+        };
+        const header = ['Задача', 'Вариация', 'Набор настроек', 'Ожидаемый ответ',
+            'Ответ', 'Время, с', 'Токены'];
+        const rows = results.map(r => [
+            r.taskName,
+            r.variation || '',
+            r.groupName,
+            r.expected || '',
+            r.answer,
+            (r.elapsedMs / 1000).toFixed(1),
+            r.tokens != null ? r.tokens : ''
+        ]);
+        const csv = [header, ...rows].map(row => row.map(esc).join(';')).join('\r\n');
+        downloadFile('batch-results.csv', csv, 'text/csv');
+    }
+
     // ----- LLM analysis of the result table -----
-    async function analyzeResults(results, btn) {
+    async function analyzeResults(results, btn, mdBtn) {
         btn.disabled = true;
         btn.textContent = 'Анализ выполняется…';
         // ----- Aggregate statistics only: per settings group and per variation -----
@@ -840,6 +892,28 @@
             }
         }
 
+        // Creative tasks (no expected answer): collect answers per task+group
+        // and measure how much repeated runs with identical settings diverge.
+        const norm = (s) => String(s).toLowerCase().replace(/ё/g, 'е').replace(/\s+/g, ' ').trim();
+        const creativeMap = new Map();
+        for (const r of results) {
+            if (r.expected) continue;
+            const key = r.taskName + '||' + r.groupName;
+            if (!creativeMap.has(key)) creativeMap.set(key, { task: r.taskName, group: r.groupName, answers: [] });
+            creativeMap.get(key).answers.push(r.answer);
+        }
+        const creativeLines = [];
+        for (const c of creativeMap.values()) {
+            const distinct = new Set(c.answers.map(a => norm(a))).size;
+            creativeLines.push('«' + c.task + '», набор «' + c.group + '»: '
+                + c.answers.length + ' прогонов, уникальных ответов ' + distinct
+                + (distinct === 1 ? ' (ответы полностью совпали)' : '')
+                + '\n  Ответы: ' + c.answers
+                    .map(a => '«' + (a.length > 120 ? a.slice(0, 120) + '…' : a).replace(/\n/g, ' ') + '»')
+                    .join('; '));
+        }
+        const hasCreative = creativeLines.length > 0;
+
         const prompt = 'Ты — аналитик качества LLM. Ниже — агрегированная статистика пакетного '
             + 'прогона задач через языковую модель: ' + results.length + ' выполнений'
             + (hasExpected ? ' (точность проверена автоматически '
@@ -853,6 +927,10 @@
             + (wrong.length
                 ? '\n\nОшибочные ответы (' + wrong.length + '):\n' + wrong.join('\n')
                 : hasExpected ? '\n\nОшибочных ответов нет — все совпали с эталоном.' : '')
+            + (hasCreative
+                ? '\n\nКреативные задачи (без эталонного ответа) — ответы повторных прогонов '
+                    + 'с одинаковыми настройками:\n' + creativeLines.join('\n')
+                : '')
             + '\n\nСделай КРАТКИЙ анализ на русском языке. Формат ответа — строго:\n'
             + '1. Таблица «Сравнение наборов настроек»: колонки — набор, точность, '
             + 'среднее время, средние токены, краткий вывод (1 строка на набор).\n'
@@ -862,9 +940,19 @@
                 : '')
             + (hasVariations ? '3' : '2') + '. Таблица «Ошибки ответов»: колонки — задача, '
             + 'набор настроек, ожидалось, получено, краткое описание причины ошибки '
-            + '(почему ответ неверен). Если ошибок нет — так и напиши одной строкой.\n'
-            + (hasVariations ? '4' : '3') + '. «Выводы»: 2–4 маркера — какие настройки '
-            + 'и формулировки лучше.\n'
+            + '(почему ответ неверен или сломался запрошенный формат). Если ошибок нет — '
+            + 'так и напиши одной строкой.\n'
+            + (hasCreative
+                ? (hasVariations ? '4' : '3') + '. Таблица «Креативные задачи: разнообразие '
+                    + 'ответов»: колонки — задача, набор настроек, уникальных ответов из N '
+                    + 'прогонов, насколько ответы отличаются по смыслу (одинаковые / близкие / '
+                    + 'разные), краткий вывод. Отдельно отметь: даёт ли temperature = 0 '
+                    + 'одинаковый ответ при каждом прогоне; сколько раз сломался формат '
+                    + 'ответа; где разнообразие полезно, а где вредно.\n'
+                : '')
+            + (hasVariations && hasCreative ? '5' : (hasVariations || hasCreative) ? '4' : '3')
+            + '. «Выводы»: 2–4 маркера — какие настройки для каких типов задач лучше '
+            + '(точные задачи vs креативные), какие формулировки лучше.\n'
             + 'Будь краток, без длинных рассуждений, только таблицы и выводы.';
 
         const progress = addMessage('Анализ результирующей таблицы…', 'system-note');
@@ -879,7 +967,8 @@
             const resp = await fetch('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: prompt })
+                // Analysis always runs on the cloud model (see llm.provider in config)
+                body: JSON.stringify({ message: prompt, useCloud: true })
             });
             if (!resp.ok) {
                 const data = await resp.json().catch(() => ({}));
@@ -915,7 +1004,15 @@
                 }
             }
             progress.remove();
-            if (!replyText) answerDiv.textContent = '(пустой ответ)';
+            if (!replyText) {
+                answerDiv.textContent = '(пустой ответ)';
+            } else if (mdBtn) {
+                // Keep the raw markdown for the "Экспорт анализа (MD)" button
+                mdBtn.dataset.md = '# Анализ результирующей таблицы\n\n'
+                    + '_Сформировано: ' + new Date().toLocaleString('ru-RU') + '_\n\n'
+                    + replyText;
+                mdBtn.disabled = false;
+            }
         } catch (e) {
             progress.textContent = 'Анализ результирующей таблицы: ошибка — ' + e.message;
             progress.classList.remove('system-note');

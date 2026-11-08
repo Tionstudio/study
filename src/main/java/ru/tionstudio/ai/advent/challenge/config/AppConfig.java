@@ -53,15 +53,58 @@ public class AppConfig {
         return value == null ? defaultValue : Integer.parseInt(value);
     }
 
+    /**
+     * Which LLM backend to use: {@code cloud} (default, remote API with a key)
+     * or {@code local-server} (OpenAI-compatible local server such as LM Studio
+     * or llama.cpp — key usually not required).
+     */
+    public String provider() {
+        return get("llm.provider", "cloud");
+    }
+
+    private boolean isLocalServer() {
+        String p = provider();
+        return "local-server".equalsIgnoreCase(p) || "local".equalsIgnoreCase(p);
+    }
+
     public String apiKey() {
+        if (isLocalServer()) {
+            // Local servers normally ignore the key, but the header must exist
+            return get("llm.local.key", "not-required");
+        }
         return require("llm.api.key");
     }
 
     public String baseUrl() {
+        if (isLocalServer()) {
+            return get("llm.local.base-url", "http://localhost:1234/v1");
+        }
         return get("llm.api.base-url", "https://openrouter.ai/api/v1");
     }
 
     public String model() {
+        if (isLocalServer()) {
+            return require("llm.local.model");
+        }
+        return get("llm.model", "openai/gpt-4o-mini");
+    }
+
+    // ----- Explicit cloud settings (llm.api.* / llm.model), independent of provider -----
+    // Used for features that must always run on the cloud model (e.g. result analysis).
+
+    public boolean hasCloudConfig() {
+        return get("llm.api.key", null) != null;
+    }
+
+    public String cloudApiKey() {
+        return require("llm.api.key");
+    }
+
+    public String cloudBaseUrl() {
+        return get("llm.api.base-url", "https://openrouter.ai/api/v1");
+    }
+
+    public String cloudModel() {
         return get("llm.model", "openai/gpt-4o-mini");
     }
 

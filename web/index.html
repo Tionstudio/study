@@ -529,6 +529,24 @@
             </fieldset>
 
             <fieldset>
+                <legend>Температура</legend>
+                <label class="option">
+                    <input type="radio" name="temperature" value="" checked>
+                    <span>none (не используется)</span>
+                </label>
+                <label class="option">
+                    <input type="radio" name="temperature" value="custom">
+                    <span class="sub">
+                        Задать значение
+                        <span class="sub-field" data-for-temp="custom">
+                            <input type="number" id="temperatureValue" min="0" max="2" step="0.1" value="0.7">
+                            <span class="hint">0–2. Передаётся только если модель поддерживает temperature (у reasoning-моделей параметр может игнорироваться).</span>
+                        </span>
+                    </span>
+                </label>
+            </fieldset>
+
+            <fieldset>
                 <legend>Контекст диалога</legend>
                 <label class="option">
                     <input type="checkbox" id="useContext">
@@ -586,6 +604,7 @@
     const formatRadios = document.querySelectorAll('input[name="format"]');
     const stopRadios = document.querySelectorAll('input[name="stopMode"]');
     const parseRadios = document.querySelectorAll('input[name="parseMode"]');
+    const tempRadios = document.querySelectorAll('input[name="temperature"]');
 
     function updateSubFields(radios, attr) {
         const checked = document.querySelector('input[name="' + radios[0].name + '"]:checked').value;
@@ -597,6 +616,7 @@
         updateSubFields(formatRadios, 'data-for');
         updateSubFields(stopRadios, 'data-for-stop');
         updateSubFields(parseRadios, 'data-for-parse');
+        updateSubFields(tempRadios, 'data-for-temp');
         // Context options are editable only while context mode is on
         const ctxOn = document.getElementById('useContext').checked;
         document.getElementById('contextLimit').disabled = !ctxOn;
@@ -604,6 +624,7 @@
     formatRadios.forEach(r => r.addEventListener('change', refreshSettings));
     stopRadios.forEach(r => r.addEventListener('change', refreshSettings));
     parseRadios.forEach(r => r.addEventListener('change', refreshSettings));
+    tempRadios.forEach(r => r.addEventListener('change', refreshSettings));
     document.getElementById('useContext').addEventListener('change', refreshSettings);
     refreshSettings();
 
@@ -613,6 +634,8 @@
         document.querySelector('input[name="stopMode"][value="natural"]').checked = true;
         document.querySelector('input[name="parseMode"][value="none"]').checked = true;
         document.querySelector('input[name="reasoningEffort"][value=""]').checked = true;
+        document.querySelector('input[name="temperature"][value=""]').checked = true;
+        document.getElementById('temperatureValue').value = 0.7;
         document.getElementById('formatDescJson').value = '';
         document.getElementById('formatDescXml').value = '';
         document.getElementById('formatDescStyled').value = '';
@@ -656,6 +679,12 @@
         document.getElementById('parseExprJsonPath').value = (s.parseMode === 'jsonpath' && s.parseExpression) || '';
         document.getElementById('parseExprXPath').value = (s.parseMode === 'xpath' && s.parseExpression) || '';
         setRadio('reasoningEffort', s.reasoningEffort || '');
+        if (typeof s.temperature === 'number') {
+            setRadio('temperature', 'custom');
+            document.getElementById('temperatureValue').value = s.temperature;
+        } else {
+            setRadio('temperature', '');
+        }
         document.getElementById('useContext').checked = !!s.useContext;
         document.getElementById('contextLimit').value = s.contextLimit || 8000;
         refreshSettings();
@@ -770,6 +799,12 @@
 
         const reasoningEffort = document.querySelector('input[name="reasoningEffort"]:checked').value;
         if (reasoningEffort) settings.reasoningEffort = reasoningEffort;
+
+        const tempMode = document.querySelector('input[name="temperature"]:checked').value;
+        if (tempMode === 'custom') {
+            const t = parseFloat(document.getElementById('temperatureValue').value);
+            if (Number.isFinite(t)) settings.temperature = Math.min(2, Math.max(0, t));
+        }
 
         if (document.getElementById('useContext').checked) {
             settings.useContext = true;
@@ -923,6 +958,7 @@
                 parts.push('стоп-последовательности: ' + applied.stopSequences.join(', '));
             }
             if (applied.reasoningEffort) parts.push('размышления: ' + applied.reasoningEffort);
+            if (typeof applied.temperature === 'number') parts.push('temperature: ' + applied.temperature);
         }
         if (context) {
             let ctx = 'контекст: ' + context.keptMessages + ' из ' + context.totalMessages + ' сообщений';

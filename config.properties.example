@@ -2,7 +2,14 @@
 # Copy this file to "config.properties" and fill in your real API key.
 # config.properties is listed in .gitignore and must NOT be committed.
 
-# OpenAI-compatible API base URL (OpenRouter by default; use https://api.openai.com/v1 for OpenAI)
+# Which LLM backend to use:
+#   cloud        — remote OpenAI-compatible API (Moonshot, OpenRouter, OpenAI, ...)
+#   local-server — local OpenAI-compatible LLM API server (LM Studio, llama.cpp, ollama, ...)
+llm.provider=cloud
+
+# ======================= Cloud LLM API =======================
+# OpenAI-compatible API base URL (use https://api.openai.com/v1 for OpenAI,
+# https://openrouter.ai/api/v1 for OpenRouter)
 llm.api.base-url=https://openrouter.ai/api/v1
 
 # Your API key (keep it secret!)
@@ -10,6 +17,17 @@ llm.api.key=sk-your-api-key-here
 
 # Model name supported by the provider
 llm.model=openai/gpt-4o-mini
+
+# ==================== Local LLM API Server ====================
+# Used when llm.provider=local-server. Base URL of the local server
+# (LM Studio default: http://localhost:1234/v1, ollama: http://localhost:11434/v1)
+llm.local.base-url=http://localhost:1234/v1
+
+# API key for the local server (usually not needed — a placeholder is sent)
+llm.local.key=not-required
+
+# Model name as the local server expects it (e.g. the name shown in LM Studio)
+llm.local.model=local-model
 
 # Local web server port
 server.port=8080
