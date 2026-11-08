@@ -403,6 +403,13 @@
                     <div id="settingsStatus" class="settings-status"></div>
                 </div>
             <fieldset>
+                <legend>Модель</legend>
+                <select id="modelSelect" style="width:100%">
+                    <option value="">По умолчанию</option>
+                </select>
+                <span class="hint">Список моделей задаётся в config.properties (llm.models / llm.local.models).</span>
+            </fieldset>
+            <fieldset>
                 <legend>Формат ответа</legend>
                 <label class="option">
                     <input type="radio" name="format" value="none" checked>
@@ -636,6 +643,7 @@
         document.querySelector('input[name="reasoningEffort"][value=""]').checked = true;
         document.querySelector('input[name="temperature"][value=""]').checked = true;
         document.getElementById('temperatureValue').value = 0.7;
+        document.getElementById('modelSelect').value = '';
         document.getElementById('formatDescJson').value = '';
         document.getElementById('formatDescXml').value = '';
         document.getElementById('formatDescStyled').value = '';
@@ -679,6 +687,18 @@
         document.getElementById('parseExprJsonPath').value = (s.parseMode === 'jsonpath' && s.parseExpression) || '';
         document.getElementById('parseExprXPath').value = (s.parseMode === 'xpath' && s.parseExpression) || '';
         setRadio('reasoningEffort', s.reasoningEffort || '');
+        if (s.model) {
+            // The preset's model may be absent from the current list — add it
+            if (![...modelSelect.options].some(o => o.value === s.model)) {
+                const opt = document.createElement('option');
+                opt.value = s.model;
+                opt.textContent = s.model;
+                modelSelect.appendChild(opt);
+            }
+            modelSelect.value = s.model;
+        } else {
+            modelSelect.value = '';
+        }
         if (typeof s.temperature === 'number') {
             setRadio('temperature', 'custom');
             document.getElementById('temperatureValue').value = s.temperature;
@@ -768,11 +788,38 @@
 
     loadPresets();
 
+    // ----- Model selection (list comes from config.properties via /api/models) -----
+    const modelSelect = document.getElementById('modelSelect');
+
+    async function loadModels() {
+        try {
+            const resp = await fetch('/api/models');
+            const data = await resp.json();
+            modelSelect.innerHTML = '';
+            const def = document.createElement('option');
+            def.value = '';
+            def.textContent = 'По умолчанию (' + (data.defaultModel || '…') + ')';
+            modelSelect.appendChild(def);
+            for (const m of (data.models || [])) {
+                if (m.id === data.default) continue; // already covered by the default option
+                const opt = document.createElement('option');
+                opt.value = m.id;
+                opt.textContent = m.model + (m.model !== m.id ? ' [' + m.id + ']' : '');
+                modelSelect.appendChild(opt);
+            }
+        } catch (e) {
+            // Server without model list: keep the static "По умолчанию" option
+        }
+    }
+    loadModels();
+
     function collectSettings() {
         const format = document.querySelector('input[name="format"]:checked').value;
         const stopMode = document.querySelector('input[name="stopMode"]:checked').value;
         const parseMode = document.querySelector('input[name="parseMode"]:checked').value;
         const settings = { format };
+
+        if (modelSelect.value) settings.model = modelSelect.value;
 
         if (format === 'json') {
             settings.formatDescription = document.getElementById('formatDescJson').value.trim();
@@ -948,6 +995,7 @@
     function addAppliedMeta(msgDiv, applied, stats, context) {
         const parts = [];
         if (applied) {
+            if (applied.model) parts.push('модель: ' + applied.model);
             if (applied.format && applied.format !== 'none' && FORMAT_LABELS[applied.format]) {
                 let f = 'Формат: ' + FORMAT_LABELS[applied.format];
                 if (applied.formatDescription) f += ' (с описанием)';

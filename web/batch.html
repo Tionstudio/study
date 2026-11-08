@@ -244,6 +244,48 @@
         contextLimitEl.disabled = !useContextEl.checked;
     });
 
+    // Approximate LLM prices (USD per 1M tokens) from /api/models.
+    // Local models have no configured price: their cost is ESTIMATED using
+    // the cheapest priced model as a reference ("≈" marker in the UI).
+    let PRICES = {};
+    let REF_PRICE = null; // cheapest configured price — reference for local models
+    fetch('/api/models').then(r => r.ok ? r.json() : null).then(data => {
+        if (!data || !Array.isArray(data.models)) return;
+        for (const m of data.models) {
+            if (m.pricePrompt != null && m.priceCompletion != null) {
+                PRICES[m.model] = { p: m.pricePrompt, c: m.priceCompletion };
+            }
+        }
+        const priced = Object.values(PRICES);
+        if (priced.length) {
+            REF_PRICE = priced.reduce((a, b) => (a.p + a.c <= b.p + b.c ? a : b));
+        }
+    }).catch(() => { /* cost calculation is optional */ });
+
+    function runPrice(r) {
+        if (!r.model) return null;
+        // No price for this model (local) → estimate by the cheapest tariff
+        return PRICES[r.model] || REF_PRICE;
+    }
+
+    // True when the cost of this run is an estimate, not a real tariff
+    function isEstimatedCost(r) {
+        return r.model != null && PRICES[r.model] == null && REF_PRICE != null;
+    }
+
+    // Approximate cost in USD for one run, or null when there are no
+    // configured prices at all / token stats are missing.
+    function runCost(r) {
+        const price = runPrice(r);
+        if (!price || r.promptTokens == null || r.completionTokens == null) return null;
+        return (r.promptTokens * price.p + r.completionTokens * price.c) / 1e6;
+    }
+
+    function fmtCost(c) {
+        if (c == null) return '';
+        return '$' + (c < 0.01 ? c.toFixed(6) : c.toFixed(4));
+    }
+
     let statusTimer = null;
     function showStatus(text, isError) {
         settingsStatus.textContent = text;
@@ -661,6 +703,7 @@
         }
         if (!replyText && doneData && doneData.reply) replyText = doneData.reply;
         const stats = doneData && doneData.stats ? doneData.stats : {};
+        const applied = doneData && doneData.applied ? doneData.applied : {};
         const tokens = (stats.totalTokens != null ? stats.totalTokens
             : (stats.promptTokens || 0) + (stats.completionTokens || 0)) + (stats.auxTokens || 0);
         progress.textContent = 'Выполнение «' + label + '»: готово ('
@@ -668,7 +711,10 @@
         return { taskName: task.name, groupName: group.name, expected: task.expectedAnswer,
             variation: task.messages.length > 1 ? 'вариант ' + (variationIndex + 1) : '',
             variationText: task.messages.length > 1 ? message : '',
-            answer: replyText || '(пустой ответ)', elapsedMs, tokens };
+            answer: replyText || '(пустой ответ)', elapsedMs, tokens,
+            model: applied.model || null,
+            promptTokens: stats.promptTokens != null ? stats.promptTokens : null,
+            completionTokens: stats.completionTokens != null ? stats.completionTokens : null };
     }
 
     function parseSseEvent(raw) {
@@ -704,11 +750,13 @@
         table.className = 'result-table';
         const hasExpected = results.some(r => r.expected);
         const hasVariations = results.some(r => r.variation);
+        const hasCost = results.some(r => runCost(r) != null);
         const columns = ['Задача'];
         if (hasVariations) columns.push('Вариация');
         columns.push('Набор настроек');
         if (hasExpected) columns.push('Ожидаемый ответ');
         columns.push('Ответ', 'Время', 'Токены');
+        if (hasCost) columns.push('Стоимость');
         const head = document.createElement('tr');
         for (const title of columns) {
             const th = document.createElement('th');
@@ -716,10 +764,12 @@
             head.appendChild(th);
         }
         table.appendChild(head);
-        let totalMs = 0, totalTokens = 0;
+        let totalMs = 0, totalTokens = 0, totalCost = 0;
         for (const r of results) {
             totalMs += r.elapsedMs;
             if (r.tokens != null) totalTokens += r.tokens;
+            const cost = runCost(r);
+            if (cost != null) totalCost += cost;
             const tr = document.createElement('tr');
             const tdName = document.createElement('td');
             tdName.textContent = r.taskName;
@@ -746,6 +796,13 @@
             const tdTokens = document.createElement('td');
             tdTokens.textContent = r.tokens != null ? r.tokens : '—';
             tds.push(tdAnswer, tdTime, tdTokens);
+            if (hasCost) {
+                const tdCost = document.createElement('td');
+                tdCost.textContent = cost != null
+                    ? (isEstimatedCost(r) ? '≈' : '') + fmtCost(cost)
+                    : '—';
+                tds.push(tdCost);
+            }
             tr.append(...tds);
             table.appendChild(tr);
         }
@@ -753,7 +810,7 @@
         const f1 = document.createElement('td');
         f1.innerHTML = '<strong>Итого</strong>';
         foot.appendChild(f1);
-        for (let i = 0; i < columns.length - 3; i++) {
+        for (let i = 0; i < columns.length - (hasCost ? 4 : 3); i++) {
             foot.appendChild(document.createElement('td'));
         }
         const fTime = document.createElement('td');
@@ -761,6 +818,17 @@
         const fTokens = document.createElement('td');
         fTokens.innerHTML = '<strong>' + totalTokens + '</strong>';
         foot.append(fTime, fTokens);
+        if (hasCost) {
+            const estimatedRuns = results.filter(isEstimatedCost).length;
+            const fCost = document.createElement('td');
+            fCost.innerHTML = '<strong>' + (estimatedRuns > 0 ? '≈' : '')
+                + fmtCost(totalCost) + '</strong>'
+                + (estimatedRuns > 0
+                    ? '<br><span style="font-weight:normal;font-size:11px;color:#6b7280">'
+                        + 'локальные — оценка по дешёвому тарифу (' + estimatedRuns + ')</span>'
+                    : '');
+            foot.appendChild(fCost);
+        }
         table.appendChild(foot);
         div.appendChild(table);
         const analyzeBtn = document.createElement('button');
@@ -811,17 +879,22 @@
             const s = v == null ? '' : String(v);
             return /[";\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
         };
-        const header = ['Задача', 'Вариация', 'Набор настроек', 'Ожидаемый ответ',
-            'Ответ', 'Время, с', 'Токены'];
-        const rows = results.map(r => [
-            r.taskName,
-            r.variation || '',
-            r.groupName,
-            r.expected || '',
-            r.answer,
-            (r.elapsedMs / 1000).toFixed(1),
-            r.tokens != null ? r.tokens : ''
-        ]);
+        const header = ['Задача', 'Вариация', 'Набор настроек', 'Модель',
+            'Ожидаемый ответ', 'Ответ', 'Время, с', 'Токены', 'Стоимость, $'];
+        const rows = results.map(r => {
+            const cost = runCost(r);
+            return [
+                r.taskName,
+                r.variation || '',
+                r.groupName,
+                r.model || '',
+                r.expected || '',
+                r.answer,
+                (r.elapsedMs / 1000).toFixed(1),
+                r.tokens != null ? r.tokens : '',
+                cost != null ? cost.toFixed(6) : ''
+            ];
+        });
         const csv = [header, ...rows].map(row => row.map(esc).join(';')).join('\r\n');
         downloadFile('batch-results.csv', csv, 'text/csv');
     }
@@ -839,7 +912,7 @@
                 if (!key) continue;
                 if (!map.has(key)) {
                     map.set(key, { runs: 0, checked: 0, correct: 0,
-                        timeMs: [], tokens: [] });
+                        timeMs: [], tokens: [], cost: 0, pricedRuns: 0, estimatedRuns: 0 });
                 }
                 const s = map.get(key);
                 s.runs++;
@@ -849,6 +922,12 @@
                 }
                 s.timeMs.push(r.elapsedMs);
                 if (r.tokens != null) s.tokens.push(r.tokens);
+                const cost = runCost(r);
+                if (cost != null) {
+                    s.cost += cost;
+                    s.pricedRuns++;
+                    if (isEstimatedCost(r)) s.estimatedRuns++;
+                }
             }
             const lines = [];
             for (const [key, s] of map) {
@@ -870,12 +949,42 @@
                         + ' (мин ' + Math.min(...s.tokens)
                         + ', макс ' + Math.max(...s.tokens) + ')';
                 }
+                if (s.pricedRuns > 0) {
+                    line += ', стоимость ~' + fmtCost(s.cost)
+                        + (s.estimatedRuns > 0
+                            ? ' (в т.ч. оценка локальных выполнений по тарифу самой дешёвой модели: '
+                                + s.estimatedRuns + ' из ' + s.runs + ')'
+                            : '');
+                } else {
+                    line += ', стоимость не считается (цены не заданы в конфиге)';
+                }
                 lines.push(line);
             }
             return lines;
         };
         const hasExpected = results.some(r => r.expected);
         const hasVariations = results.some(r => r.variation);
+
+        // Overall approximate cost: configured tariffs for cloud models,
+        // cheapest-tariff estimate for local ones
+        let totalCost = 0, pricedRuns = 0, estimatedRuns = 0;
+        for (const r of results) {
+            const c = runCost(r);
+            if (c != null) {
+                totalCost += c;
+                pricedRuns++;
+                if (isEstimatedCost(r)) estimatedRuns++;
+            }
+        }
+        const costSummary = pricedRuns > 0
+            ? '\nПриблизительная стоимость прогона: ~' + fmtCost(totalCost)
+                + ' (учтено ' + pricedRuns + ' из ' + results.length + ' выполнений'
+                + (estimatedRuns > 0
+                    ? '; для локальных моделей стоимость — ОЦЕНКА по тарифу самой дешёвой '
+                        + 'модели из конфига, таких выполнений: ' + estimatedRuns
+                    : '')
+                + ').'
+            : '\nЦены не заданы в конфиге — стоимость не рассчитывается.';
 
         // Wrong answers: compact list for the error table (answer truncated)
         const wrong = [];
@@ -918,7 +1027,7 @@
             + 'прогона задач через языковую модель: ' + results.length + ' выполнений'
             + (hasExpected ? ' (точность проверена автоматически '
                 + 'сравнением с эталонным ответом)' : '')
-            + '.\n\nСтатистика по наборам настроек:\n'
+            + '.' + costSummary + '\n\nСтатистика по наборам настроек:\n'
             + aggregate(r => r.groupName).join('\n')
             + (hasVariations
                 ? '\n\nСтатистика по вариациям формулировки запросов:\n'
@@ -933,7 +1042,8 @@
                 : '')
             + '\n\nСделай КРАТКИЙ анализ на русском языке. Формат ответа — строго:\n'
             + '1. Таблица «Сравнение наборов настроек»: колонки — набор, точность, '
-            + 'среднее время, средние токены, краткий вывод (1 строка на набор).\n'
+            + 'среднее время, средние токены, приблизительная стоимость ($), краткий '
+            + 'вывод (1 строка на набор).\n'
             + (hasVariations
                 ? '2. Таблица «Влияние формулировки запроса»: колонки — вариация, '
                     + 'точность, среднее время, средние токены, краткий вывод.\n'

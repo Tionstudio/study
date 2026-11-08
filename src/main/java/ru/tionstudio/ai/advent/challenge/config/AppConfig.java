@@ -4,6 +4,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Properties;
 
 /**
@@ -11,12 +14,25 @@ import java.util.Properties;
  * located in the working directory (project root).
  *
  * <p>The file is intentionally NOT committed to git (see .gitignore)
- * because it contains the LLM API key. Use {@code config.properties.example}
+ * because it contains the LLM API keys. Use {@code config.properties.example}
  * as a template.</p>
+ *
+ * <p>Model settings are organized into named groups: {@code llm.models}
+ * lists the group ids, and each group has {@code llm.models.<id>.model},
+ * {@code llm.models.<id>.api.key} and {@code llm.models.<id>.api.base-url}.
+ * {@code llm.default-model} picks the group used for requests by default,
+ * {@code llm.analysis.model} the one used for batch-result analysis.</p>
  */
 public class AppConfig {
 
     public static final Path CONFIG_PATH = Path.of("config.properties");
+
+    /** One model settings group: id, model name, API key and base URL.
+     * Optional prices are in USD per 1M tokens; null = cost not tracked
+     * (e.g. local models). */
+    public record ModelConfig(String id, String model, String apiKey, String baseUrl,
+                              Double pricePrompt, Double priceCompletion) {
+    }
 
     private final Properties props = new Properties();
 
@@ -54,57 +70,100 @@ public class AppConfig {
     }
 
     /**
-     * Which LLM backend to use: {@code cloud} (default, remote API with a key)
-     * or {@code local-server} (OpenAI-compatible local server such as LM Studio
-     * or llama.cpp — key usually not required).
+     * All configured model groups, in the order given by {@code llm.models}.
+     * Groups missing {@code model} or {@code api.base-url} are skipped.
+     * When no groups are configured, falls back to the legacy single-provider
+     * keys ({@code llm.provider} / {@code llm.api.*} / {@code llm.local.*}).
      */
-    public String provider() {
-        return get("llm.provider", "cloud");
+    public List<ModelConfig> modelConfigs() {
+        List<ModelConfig> list = new ArrayList<>();
+        String raw = get("llm.models", "");
+        for (String id : Arrays.stream(raw.split(","))
+                .map(String::trim).filter(s -> !s.isEmpty()).toList()) {
+            String model = get("llm.models." + id + ".model", null);
+            String apiKey = get("llm.models." + id + ".api.key", "not-required");
+            String baseUrl = get("llm.models." + id + ".api.base-url", null);
+            Double pricePrompt = getPrice("llm.models." + id + ".price.prompt");
+            Double priceCompletion = getPrice("llm.models." + id + ".price.completion");
+            if (model != null && baseUrl != null) {
+                list.add(new ModelConfig(id, model, apiKey, baseUrl,
+                        pricePrompt, priceCompletion));
+            }
+        }
+        if (list.isEmpty()) {
+            // Legacy single-provider configuration
+            list.add(new ModelConfig("default", legacyModel(), legacyApiKey(), legacyBaseUrl(),
+                    null, null));
+        }
+        return list;
     }
 
+    /** Optional USD-per-1M-tokens price; blank or invalid → null. */
+    private Double getPrice(String key) {
+        String raw = get(key, null);
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return Double.parseDouble(raw);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** Default model group ({@code llm.default-model}); falls back to the first group. */
+    public ModelConfig defaultModelConfig() {
+        return resolve(get("llm.default-model", null), modelConfigs());
+    }
+
+    /** Model group for batch-result analysis ({@code llm.analysis.model});
+     * falls back to the default group. */
+    public ModelConfig analysisModelConfig() {
+        List<ModelConfig> list = modelConfigs();
+        String ref = get("llm.analysis.model", null);
+        if (ref != null) {
+            return resolve(ref, list);
+        }
+        return resolve(get("llm.default-model", null), list);
+    }
+
+    /** Resolves a group reference — by group id or by model name. */
+    private static ModelConfig resolve(String ref, List<ModelConfig> list) {
+        if (ref != null) {
+            for (ModelConfig c : list) {
+                if (c.id().equalsIgnoreCase(ref) || c.model().equalsIgnoreCase(ref)) {
+                    return c;
+                }
+            }
+        }
+        return list.get(0);
+    }
+
+    // ----- Legacy single-provider keys (fallback when no groups configured) -----
+
     private boolean isLocalServer() {
-        String p = provider();
+        String p = get("llm.provider", "cloud");
         return "local-server".equalsIgnoreCase(p) || "local".equalsIgnoreCase(p);
     }
 
-    public String apiKey() {
+    private String legacyApiKey() {
         if (isLocalServer()) {
-            // Local servers normally ignore the key, but the header must exist
             return get("llm.local.key", "not-required");
         }
         return require("llm.api.key");
     }
 
-    public String baseUrl() {
+    private String legacyBaseUrl() {
         if (isLocalServer()) {
             return get("llm.local.base-url", "http://localhost:1234/v1");
         }
         return get("llm.api.base-url", "https://openrouter.ai/api/v1");
     }
 
-    public String model() {
+    private String legacyModel() {
         if (isLocalServer()) {
             return require("llm.local.model");
         }
-        return get("llm.model", "openai/gpt-4o-mini");
-    }
-
-    // ----- Explicit cloud settings (llm.api.* / llm.model), independent of provider -----
-    // Used for features that must always run on the cloud model (e.g. result analysis).
-
-    public boolean hasCloudConfig() {
-        return get("llm.api.key", null) != null;
-    }
-
-    public String cloudApiKey() {
-        return require("llm.api.key");
-    }
-
-    public String cloudBaseUrl() {
-        return get("llm.api.base-url", "https://openrouter.ai/api/v1");
-    }
-
-    public String cloudModel() {
         return get("llm.model", "openai/gpt-4o-mini");
     }
 

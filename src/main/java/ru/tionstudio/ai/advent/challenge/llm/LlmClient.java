@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import ru.tionstudio.ai.advent.challenge.config.AppConfig;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -87,10 +86,6 @@ public class LlmClient {
     private final String endpoint;
     private final String model;
 
-    public LlmClient(AppConfig config) {
-        this(config.apiKey(), config.baseUrl(), config.model());
-    }
-
     public LlmClient(String apiKey, String baseUrl, String model) {
         this.apiKey = apiKey;
         this.endpoint = baseUrl.replaceAll("/+$", "") + "/chat/completions";
@@ -98,6 +93,11 @@ public class LlmClient {
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(15))
                 .build();
+    }
+
+    /** The default model this client sends when a request has no override. */
+    public String model() {
+        return model;
     }
 
     /**
@@ -170,15 +170,36 @@ public class LlmClient {
                 .build();
 
         long startNanos = System.nanoTime();
-        HttpResponse<InputStream> response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
-
-        if (response.statusCode() / 100 != 2) {
-            String errorBody;
+        HttpResponse<InputStream> response = null;
+        String errorBody = null;
+        // Retry transient failures: providers under parallel load (batch mode)
+        // often answer 429/5xx — a short backoff usually gets the request through
+        final int maxAttempts = 4;
+        final long[] backoffMs = { 2000, 5000, 10000 };
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            response = httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+            int status = response.statusCode();
+            if (status / 100 == 2) {
+                break;
+            }
             try (InputStream in = response.body()) {
                 errorBody = new String(in.readAllBytes(), StandardCharsets.UTF_8);
             }
-            LOG.warning("LLM API error: HTTP " + response.statusCode() + ": " + abbreviate(errorBody, 300));
-            throw new IOException("LLM API returned HTTP " + response.statusCode() + ": " + errorBody);
+            response = null;
+            boolean retryable = status == 429 || status == 500 || status == 502
+                    || status == 503 || status == 504;
+            if (retryable && attempt < maxAttempts) {
+                long delay = backoffMs[attempt - 1];
+                LOG.warning("LLM API error: HTTP " + status + " (attempt " + attempt + "/"
+                        + maxAttempts + "), retrying in " + delay + " ms: "
+                        + abbreviate(errorBody, 300));
+                Thread.sleep(delay);
+            } else {
+                LOG.warning("LLM API error: HTTP " + status + " (attempt " + attempt + "/"
+                        + maxAttempts + "), giving up: " + abbreviate(errorBody, 300));
+                throw new IOException("LLM API returned HTTP " + status + ": "
+                        + abbreviate(errorBody, 300));
+            }
         }
 
         StringBuilder reply = new StringBuilder();

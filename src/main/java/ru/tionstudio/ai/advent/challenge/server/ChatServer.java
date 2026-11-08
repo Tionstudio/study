@@ -3,9 +3,11 @@ package ru.tionstudio.ai.advent.challenge.server;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import ru.tionstudio.ai.advent.challenge.config.AppConfig;
 import ru.tionstudio.ai.advent.challenge.conversation.ConversationManager;
 import ru.tionstudio.ai.advent.challenge.conversation.ConversationStore;
 import ru.tionstudio.ai.advent.challenge.llm.LlmClient;
@@ -60,16 +62,24 @@ public class ChatServer {
     );
 
     private final int port;
-    private final LlmClient llmClient;
-    private final LlmClient cloudLlmClient; // may be null when cloud is not configured
+    /** Model group id -> client, in config order. */
+    private final Map<String, LlmClient> clientsById;
+    /** Group configs (id + model + base-url) in config order, for /api/models. */
+    private final List<AppConfig.ModelConfig> modelConfigs;
+    private final LlmClient defaultClient;
+    private final LlmClient analysisClient;
     private final PresetStore presetStore;
     private final ConversationManager conversationManager;
 
-    public ChatServer(int port, LlmClient llmClient, LlmClient cloudLlmClient,
+    public ChatServer(int port, Map<String, LlmClient> clientsById,
+                      List<AppConfig.ModelConfig> modelConfigs,
+                      LlmClient defaultClient, LlmClient analysisClient,
                       PresetStore presetStore, ConversationManager conversationManager) {
         this.port = port;
-        this.llmClient = llmClient;
-        this.cloudLlmClient = cloudLlmClient;
+        this.clientsById = clientsById;
+        this.modelConfigs = modelConfigs;
+        this.defaultClient = defaultClient;
+        this.analysisClient = analysisClient;
         this.presetStore = presetStore;
         this.conversationManager = conversationManager;
     }
@@ -79,10 +89,21 @@ public class ChatServer {
         server.createContext("/api/chat", this::handleChat);
         server.createContext("/api/presets", this::handlePresets);
         server.createContext("/api/conversations", this::handleConversations);
+        server.createContext("/api/models", this::handleModels);
         server.createContext("/", this::handleStatic);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.start();
         LOG.info("Server started: http://localhost:" + port + "/");
+    }
+
+    /** Finds a client by group id or by model name (case-insensitive). */
+    private LlmClient resolveClient(String ref) {
+        for (AppConfig.ModelConfig c : modelConfigs) {
+            if (c.id().equalsIgnoreCase(ref) || c.model().equalsIgnoreCase(ref)) {
+                return clientsById.get(c.id());
+            }
+        }
+        return null;
     }
 
     private void handleChat(HttpExchange exchange) throws IOException {
@@ -105,19 +126,28 @@ public class ChatServer {
             ConversationManager.ContextSettings contextSettings =
                     ConversationManager.ContextSettings.parse(json);
 
-            // Requests can explicitly demand the cloud model (useCloud=true),
-            // e.g. batch-result analysis must run on the cloud even when the
-            // primary provider is a local server.
-            boolean useCloud = json.path("useCloud").asBoolean(false);
-            LlmClient client = llmClient;
-            if (useCloud) {
-                if (cloudLlmClient == null) {
-                    sendJson(exchange, 400, errorJson(
-                            "Облачный провайдер не настроен (llm.api.key отсутствует в config.properties)."));
-                    return;
+            // Client selection:
+            //  - useCloud=true  → the analysis model (llm.analysis.model), used
+            //    by "Анализ результирующей таблицы";
+            //  - "model" field  → the chosen model group (id or model name),
+            //    e.g. from the chat settings or batch JSON;
+            //  - otherwise      → the default model (llm.default-model).
+            LlmClient client = defaultClient;
+            if (json.path("useCloud").asBoolean(false)) {
+                client = analysisClient;
+            } else {
+                String modelRef = json.path("model").asText(null);
+                if (modelRef != null && !modelRef.isBlank()) {
+                    LlmClient selected = resolveClient(modelRef.trim());
+                    if (selected == null) {
+                        sendJson(exchange, 400, errorJson("Unknown model: '" + modelRef
+                                + "'. Configure it in config.properties (llm.models)."));
+                        return;
+                    }
+                    client = selected;
                 }
-                client = cloudLlmClient;
             }
+            final String effectiveModel = client.model();
 
             // Server-Sent Events: tokens are pushed to the page as they arrive
             exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
@@ -199,8 +229,11 @@ public class ChatServer {
                         return;
                     } catch (Exception e) {
                         LOG.log(Level.WARNING, "LLM request failed", e);
+                        String errText = e.getMessage() != null
+                                ? e.getMessage()
+                                : e.getClass().getSimpleName() + " (LLM server unreachable?)";
                         synchronized (out) {
-                            writeSse(out, "error", errorJson("LLM request failed: " + e.getMessage()));
+                            writeSse(out, "error", errorJson("LLM request failed: " + errText));
                         }
                         return;
                     }
@@ -211,7 +244,7 @@ public class ChatServer {
 
                     ObjectNode doneJson = MAPPER.createObjectNode();
                     doneJson.put("reply", result.reply());
-                    doneJson.set("applied", appliedJson(options));
+                    doneJson.set("applied", appliedJson(options, effectiveModel));
                     ObjectNode statsNode = statsJson(result, elapsedMs);
                     if (prepared.auxTokens() > 0) {
                         // Tokens spent on the auxiliary summarization call
@@ -456,12 +489,48 @@ public class ChatServer {
     }
 
     /**
+     * GET /api/models — model groups the UI may offer for selection:
+     * group id and model name for each group, the default group id
+     * and the model used for batch-result analysis.
+     */
+    private void handleModels(HttpExchange exchange) throws IOException {
+        if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+            sendJson(exchange, 405, errorJson("Method not allowed. Use GET."));
+            return;
+        }
+        ObjectNode root = MAPPER.createObjectNode();
+        String defaultId = null;
+        for (AppConfig.ModelConfig c : modelConfigs) {
+            if (clientsById.get(c.id()) == defaultClient) {
+                defaultId = c.id();
+            }
+        }
+        root.put("default", defaultId != null ? defaultId : modelConfigs.get(0).id());
+        root.put("defaultModel", defaultClient.model());
+        root.put("analysisModel", analysisClient.model());
+        ArrayNode arr = root.putArray("models");
+        for (AppConfig.ModelConfig c : modelConfigs) {
+            ObjectNode item = arr.addObject();
+            item.put("id", c.id());
+            item.put("model", c.model());
+            if (c.pricePrompt() != null) {
+                item.put("pricePrompt", c.pricePrompt());
+            }
+            if (c.priceCompletion() != null) {
+                item.put("priceCompletion", c.priceCompletion());
+            }
+        }
+        sendJson(exchange, 200, root.toString());
+    }
+
+    /**
      * Serializes the actually applied options so the web page can display
      * them next to each LLM answer.
      */
-    private static ObjectNode appliedJson(LlmClient.ChatOptions options) {
+    private static ObjectNode appliedJson(LlmClient.ChatOptions options, String effectiveModel) {
         ObjectNode applied = MAPPER.createObjectNode();
         applied.put("format", options.format());
+        applied.put("model", effectiveModel);
         if (options.formatDescription() != null && !options.formatDescription().isBlank()) {
             applied.put("formatDescription", options.formatDescription());
         }
