@@ -189,6 +189,7 @@
     <div class="header">
         <h1>Пакетный режим</h1>
         <a class="nav-link" href="/index.html">← Обычный чат</a>
+        <a class="nav-link" href="/chat_agent.html">Агент →</a>
     </div>
 
     <div class="layout">
@@ -347,8 +348,14 @@
                 const code = [];
                 i++;
                 while (i < lines.length && !/^\s*```/.test(lines[i])) { code.push(lines[i]); i++; }
-                i++; // closing fence
+                // closing fence: text glued after ``` belongs to the next paragraph
+                const closing = i < lines.length ? lines[i] : '';
+                i++;
                 html += '<pre class="md-code"><code>' + escapeHtml(code.join('\n')) + '</code></pre>';
+                const rest = closing.replace(/^\s*```\s*/, '');
+                if (rest) {
+                    para.push(rest);
+                }
                 continue;
             }
 

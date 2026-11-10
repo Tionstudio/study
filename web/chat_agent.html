@@ -1,0 +1,876 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Агент — LLM Chat</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+            background: #f0f2f5;
+            display: flex;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 24px;
+        }
+        .container {
+            width: 100%;
+            max-width: 1400px;
+            height: calc(100vh - 48px);
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .header { display: flex; align-items: baseline; gap: 16px; }
+        h1 { font-size: 20px; color: #1a1a1a; }
+        .nav-link { font-size: 13px; color: #2563eb; text-decoration: none; }
+        .nav-link:hover { text-decoration: underline; }
+
+        .layout { flex: 1; min-height: 0; display: flex; gap: 16px; align-items: stretch; }
+        .chat-column { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
+
+        .settings {
+            width: 380px;
+            flex-shrink: 0;
+            position: sticky;
+            top: 24px;
+            max-height: calc(100vh - 48px);
+            overflow-y: auto;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+        }
+        .settings-title {
+            padding: 12px 16px;
+            font-size: 14px;
+            font-weight: 600;
+            color: #1a1a1a;
+            border-bottom: 1px solid #eee;
+        }
+        .settings-body { padding: 12px 16px 16px; display: flex; flex-direction: column; gap: 14px; }
+        fieldset { border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px 14px 12px; }
+        legend { font-size: 13px; font-weight: 600; color: #374151; padding: 0 6px; }
+        .option { display: flex; align-items: flex-start; gap: 8px; padding: 4px 0; font-size: 14px; color: #1f2937; }
+        .hint { font-size: 12px; color: #6b7280; }
+        .number-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 0 4px 26px;
+            font-size: 14px;
+            color: #1f2937;
+        }
+        .number-row input[type="number"], .settings input[type="number"].solo {
+            width: 100px;
+            padding: 6px 10px;
+            border: 1px solid #ccc;
+            border-radius: 6px;
+            font-size: 13px;
+            font-family: inherit;
+        }
+        .settings input[type="number"].solo { margin: 4px 0; }
+        input:disabled + span, input:disabled { opacity: 0.5; }
+        .btn {
+            padding: 7px 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 6px;
+            background: #fff;
+            color: #374151;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .btn:hover { background: #f3f4f6; }
+        .btn.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+        .btn.primary:hover { background: #1d4ed8; }
+        .btn.danger { background: #dc2626; border-color: #dc2626; color: #fff; }
+        .btn.danger:hover { background: #b91c1c; }
+        .btn:disabled { background: #9ca3af; border-color: #9ca3af; color: #fff; cursor: default; }
+        .settings-status { font-size: 12px; color: #16a34a; min-height: 15px; }
+        .settings-status.error { color: #991b1b; }
+
+        @media (max-width: 900px) {
+            .container { height: auto; min-height: calc(100vh - 48px); }
+            .layout { flex-direction: column; }
+            #chat { min-height: 300px; max-height: 60vh; }
+            .settings { width: 100%; position: static; max-height: none; }
+        }
+
+        /* ---------- Chat ---------- */
+        #chat {
+            flex: 1;
+            min-height: 0;
+            overflow-y: auto;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 10px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .msg {
+            max-width: 85%;
+            padding: 10px 14px;
+            border-radius: 12px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            line-height: 1.45;
+            font-size: 14px;
+        }
+        .msg.user { align-self: flex-end; background: #2563eb; color: #fff; }
+        .msg.assistant { align-self: flex-start; background: #e5e7eb; color: #1a1a1a; }
+        .msg.error { align-self: flex-start; background: #fee2e2; color: #991b1b; }
+        .msg.system-note {
+            align-self: center;
+            background: transparent;
+            color: #9ca3af;
+            font-size: 12px;
+            padding: 2px 8px;
+        }
+        .msg.permission { align-self: flex-start; background: #fef3c7; color: #92400e; }
+        .msg.permission .perm-actions { margin-top: 8px; display: flex; gap: 8px; }
+
+        /* Rendered markdown inside assistant bubbles */
+        .msg.assistant.md { white-space: normal; }
+        .msg.assistant.md p { margin: 4px 0; }
+        .msg.assistant.md .md-h { font-weight: 600; margin: 10px 0 4px; }
+        .msg.assistant.md .md-h1 { font-size: 17px; }
+        .msg.assistant.md .md-h2 { font-size: 15.5px; }
+        .msg.assistant.md .md-h3, .msg.assistant.md .md-h4 { font-size: 14px; }
+        .msg.assistant.md .md-list { margin: 4px 0 4px 22px; }
+        .msg.assistant.md .md-list li { margin: 2px 0; }
+        .msg.assistant.md .md-table { border-collapse: collapse; margin: 6px 0; font-size: 13px; }
+        .msg.assistant.md .md-table th, .msg.assistant.md .md-table td {
+            border: 1px solid #c7ccd1;
+            padding: 4px 10px;
+            text-align: left;
+        }
+        .msg.assistant.md .md-table th { background: rgba(0, 0, 0, 0.05); font-weight: 600; }
+        .msg.assistant.md code {
+            background: rgba(0, 0, 0, 0.08);
+            padding: 1px 5px;
+            border-radius: 4px;
+            font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+            font-size: 12.5px;
+        }
+        .msg.assistant.md .md-code {
+            background: #1f2937;
+            color: #e5e7eb;
+            padding: 10px 12px;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 6px 0;
+            font-size: 12.5px;
+        }
+        .msg.assistant.md .md-code code { background: none; padding: 0; }
+        .msg.assistant.md .md-quote {
+            border-left: 3px solid #c7ccd1;
+            margin: 4px 0;
+            padding: 2px 10px;
+            color: #4b5563;
+        }
+        .msg.assistant.md .md-hr { border: none; border-top: 1px solid #c7ccd1; margin: 8px 0; }
+        .msg.assistant.md a { color: #1d4ed8; }
+
+        /* Tool call blocks */
+        .tool-block {
+            align-self: stretch;
+            max-width: 85%;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            background: #f9fafb;
+            font-size: 12.5px;
+        }
+        .tool-block summary {
+            padding: 6px 10px;
+            cursor: pointer;
+            color: #374151;
+            font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .tool-block pre {
+            border-top: 1px solid #e5e7eb;
+            padding: 8px 10px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-height: 240px;
+            overflow-y: auto;
+            color: #1f2937;
+        }
+        .tool-block.error { border-color: #fca5a5; background: #fef2f2; }
+        .tool-block.error pre { color: #991b1b; }
+
+        /* Plan block */
+        .plan-block {
+            align-self: stretch;
+            max-width: 85%;
+            border: 1px solid #bfdbfe;
+            background: #eff6ff;
+            border-radius: 8px;
+            padding: 8px 12px;
+            font-size: 13px;
+            color: #1e3a8a;
+        }
+        .plan-block .plan-title { font-weight: 600; margin-bottom: 4px; }
+        .plan-block ul { margin-left: 18px; }
+        .plan-block li { margin: 2px 0; }
+        .plan-block li.done { color: #16a34a; text-decoration: line-through; }
+        .plan-block li.in_progress { font-weight: 600; }
+
+        /* Reasoning (thinking) block */
+        .tool-block.reasoning { border-style: dashed; background: #fff; }
+        .tool-block.reasoning pre { color: #6b7280; font-style: italic; }
+
+        .chat-status-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .chat-status { font-size: 12px; color: #9ca3af; min-height: 15px; padding: 0 4px; }
+        .chat-status-row .btn { padding: 3px 12px; font-size: 12px; }
+        .chat-actions { display: flex; gap: 6px; }
+
+        .input-row { display: flex; gap: 8px; }
+        #input {
+            flex: 1;
+            resize: none;
+            padding: 10px 12px;
+            border: 1px solid #ccc;
+            border-radius: 8px;
+            font-size: 14px;
+            font-family: inherit;
+        }
+        #send { padding: 10px 18px; font-size: 14px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>Агент</h1>
+        <a class="nav-link" href="/index.html">← Обычный чат</a>
+        <a class="nav-link" href="/batch.html">Пакетный режим</a>
+    </div>
+
+    <div class="layout">
+        <div class="chat-column">
+            <div id="chat"></div>
+            <div class="chat-status-row">
+                <div id="chatStatus" class="chat-status"></div>
+                <div class="chat-actions">
+                    <button id="pauseBtn" type="button" class="btn" style="display:none">Пауза</button>
+                    <button id="abortBtn" type="button" class="btn danger" style="display:none">Прервать</button>
+                </div>
+            </div>
+            <div class="input-row">
+                <textarea id="input" rows="2" placeholder="Введите запрос… (Enter — отправить, Shift+Enter — новая строка)"></textarea>
+                <button id="send" class="btn primary">Отправить</button>
+            </div>
+        </div>
+
+        <aside class="settings">
+            <div class="settings-title">Настройки</div>
+            <div class="settings-body">
+                <fieldset>
+                    <legend>Сжатие контекста</legend>
+                    <label class="option">
+                        <input type="radio" name="compression" value="none" checked>
+                        <span>Без сжатия</span>
+                    </label>
+                    <label class="option">
+                        <input type="radio" name="compression" value="lastN">
+                        <span>Последние N сообщений</span>
+                    </label>
+                    <div class="number-row">
+                        <span>N:</span>
+                        <input type="number" id="contextMessages" min="1" max="500" value="20" disabled>
+                    </div>
+                    <span class="hint">Системный промпт с инструментами всегда остаётся в контексте и не сжимается. Считаются только реплики пользователя и ассистента.</span>
+                </fieldset>
+
+                <fieldset>
+                    <legend>Инструменты</legend>
+                    <div class="number-row" style="padding-left:0">
+                        <span>Макс. вызовов подряд:</span>
+                        <input type="number" id="maxToolCalls" min="1" max="50" value="5">
+                    </div>
+                    <span class="hint">Инструменты агента: системное время, список файлов, чтение, запись, дописывание, удаление файлов (test/), калькулятор. Запись и удаление требуют вашего подтверждения.</span>
+                </fieldset>
+
+                <fieldset>
+                    <legend>Планирование</legend>
+                    <label class="option">
+                        <input type="checkbox" id="planning" checked>
+                        <span>Составлять план перед выполнением</span>
+                    </label>
+                    <span class="hint">План отображается в чате, агент отмечает прогресс по шагам (инструмент update_plan).</span>
+                </fieldset>
+
+                <fieldset>
+                    <legend>Диалог</legend>
+                    <button id="newChat" type="button" class="btn">Новый диалог</button>
+                    <div id="settingsStatus" class="settings-status" style="margin-top:6px"></div>
+                </fieldset>
+            </div>
+        </aside>
+    </div>
+</div>
+
+<script>
+    const chatEl = document.getElementById('chat');
+    const chatStatusEl = document.getElementById('chatStatus');
+    const settingsStatus = document.getElementById('settingsStatus');
+    const inputEl = document.getElementById('input');
+    const sendBtn = document.getElementById('send');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const abortBtn = document.getElementById('abortBtn');
+    const contextMessagesEl = document.getElementById('contextMessages');
+    const maxToolCallsEl = document.getElementById('maxToolCalls');
+    const planningEl = document.getElementById('planning');
+
+    let sessionId = null;
+    let busy = false;
+    let paused = false;
+
+    // Compression radios enable/disable the N input
+    document.querySelectorAll('input[name="compression"]').forEach(r => {
+        r.addEventListener('change', () => {
+            contextMessagesEl.disabled = getCompression() !== 'lastN';
+        });
+    });
+
+    function getCompression() {
+        return document.querySelector('input[name="compression"]:checked').value;
+    }
+
+    let statusTimer = null;
+    function showStatus(text, isError) {
+        settingsStatus.textContent = text;
+        settingsStatus.classList.toggle('error', !!isError);
+        clearTimeout(statusTimer);
+        statusTimer = setTimeout(() => { settingsStatus.textContent = ''; }, 5000);
+    }
+
+    function setChatStatus(text) {
+        chatStatusEl.textContent = text;
+    }
+
+    function escapeHtml(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    function addMessage(text, role) {
+        const div = document.createElement('div');
+        div.className = 'msg ' + role;
+        div.textContent = text;
+        chatEl.appendChild(div);
+        chatEl.scrollTop = chatEl.scrollHeight;
+        return div;
+    }
+
+    // Minimal markdown renderer (same as on the other pages): headings,
+    // lists, tables, code blocks, quotes, hr, inline code/bold/italic/links.
+    function renderMarkdown(src) {
+        const lines = String(src).replace(/\r\n/g, '\n').split('\n');
+        let html = '';
+        let para = [];
+        let i = 0;
+
+        const inline = (text) => {
+            let t = escapeHtml(text);
+            t = t.replace(/`([^`]+)`/g, '<code>$1</code>');
+            t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+            t = t.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+            t = t.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+            t = t.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,
+                '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+            return t;
+        };
+        const flushPara = () => {
+            if (para.length) {
+                html += '<p>' + para.map(inline).join('<br>') + '</p>';
+                para = [];
+            }
+        };
+        const splitRow = (row) => row.trim().replace(/^\|/, '').replace(/\|$/, '')
+            .split('|').map(c => c.trim());
+
+        while (i < lines.length) {
+            const line = lines[i];
+
+            if (/^\s*```/.test(line)) { // fenced code block
+                flushPara();
+                const code = [];
+                i++;
+                while (i < lines.length && !/^\s*```/.test(lines[i])) { code.push(lines[i]); i++; }
+                // closing fence: text glued after ``` belongs to the next paragraph
+                const closing = i < lines.length ? lines[i] : '';
+                i++;
+                html += '<pre class="md-code"><code>' + escapeHtml(code.join('\n')) + '</code></pre>';
+                const rest = closing.replace(/^\s*```\s*/, '');
+                if (rest) {
+                    para.push(rest);
+                }
+                continue;
+            }
+
+            if (line.includes('|') && i + 1 < lines.length
+                    && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1]) && lines[i + 1].includes('-')) {
+                flushPara();
+                const headers = splitRow(line);
+                i += 2;
+                const rows = [];
+                while (i < lines.length && lines[i].includes('|') && lines[i].trim() !== '') {
+                    rows.push(splitRow(lines[i]));
+                    i++;
+                }
+                html += '<table class="md-table"><thead><tr>'
+                    + headers.map(h => '<th>' + inline(h) + '</th>').join('')
+                    + '</tr></thead><tbody>'
+                    + rows.map(r => '<tr>' + r.map(c => '<td>' + inline(c) + '</td>').join('') + '</tr>').join('')
+                    + '</tbody></table>';
+                continue;
+            }
+
+            const h = line.match(/^(#{1,4})\s+(.*)$/);
+            if (h) {
+                flushPara();
+                html += '<div class="md-h md-h' + h[1].length + '">' + inline(h[2]) + '</div>';
+                i++;
+                continue;
+            }
+
+            if (/^\s*>\s?/.test(line)) {
+                flushPara();
+                html += '<blockquote class="md-quote">' + inline(line.replace(/^\s*>\s?/, '')) + '</blockquote>';
+                i++;
+                continue;
+            }
+
+            if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) {
+                flushPara();
+                html += '<hr class="md-hr">';
+                i++;
+                continue;
+            }
+
+            if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
+                flushPara();
+                const ordered = /^\s*\d+\./.test(line);
+                const items = [];
+                while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) {
+                    items.push(lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, ''));
+                    i++;
+                }
+                const tag = ordered ? 'ol' : 'ul';
+                html += '<' + tag + ' class="md-list">'
+                    + items.map(it => '<li>' + inline(it) + '</li>').join('')
+                    + '</' + tag + '>';
+                continue;
+            }
+
+            if (line.trim() === '') { flushPara(); i++; continue; }
+            para.push(line);
+            i++;
+        }
+        flushPara();
+        return html;
+    }
+
+    // ----- Plan block -----
+    let planBlock = null;
+    function renderPlan(steps) {
+        if (!planBlock || !planBlock.isConnected) {
+            planBlock = document.createElement('div');
+            planBlock.className = 'plan-block';
+            chatEl.appendChild(planBlock);
+        }
+        const icons = { pending: '⏳', in_progress: '🔄', done: '✅' };
+        planBlock.innerHTML = '<div class="plan-title">📋 План</div><ul>'
+            + steps.map(s => '<li class="' + escapeHtml(s.status) + '">'
+                + (icons[s.status] || '⏳') + ' ' + escapeHtml(s.title) + '</li>').join('')
+            + '</ul>';
+        chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    // ----- Reasoning (thinking) block -----
+    let reasoningBlock = null, reasoningPre = null;
+    function ensureReasoningBlock() {
+        if (!reasoningBlock) {
+            reasoningBlock = document.createElement('details');
+            reasoningBlock.className = 'tool-block reasoning';
+            reasoningBlock.open = true;
+            const sum = document.createElement('summary');
+            sum.textContent = '🧠 Мышление';
+            reasoningBlock.appendChild(sum);
+            reasoningPre = document.createElement('pre');
+            reasoningBlock.appendChild(reasoningPre);
+            chatEl.appendChild(reasoningBlock);
+            chatEl.scrollTop = chatEl.scrollHeight;
+        }
+    }
+    function closeReasoningBlock() {
+        if (reasoningBlock) {
+            if (!reasoningPre.textContent.trim()) {
+                // Only whitespace arrived (some providers stream empty
+                // "thinking" noise after the content) — drop the block
+                reasoningBlock.remove();
+            } else {
+                reasoningBlock.open = false;
+            }
+            reasoningBlock = null;
+            reasoningPre = null;
+        }
+    }
+
+    // ----- Tool call blocks -----
+    function addToolBlock(tool, args) {
+        const det = document.createElement('details');
+        det.className = 'tool-block';
+        const sum = document.createElement('summary');
+        const argsText = JSON.stringify(args);
+        sum.textContent = '🔧 ' + tool + (argsText && argsText !== '{}' ? ' ' + argsText : '');
+        sum.title = sum.textContent;
+        det.appendChild(sum);
+        const pre = document.createElement('pre');
+        pre.textContent = 'выполняется…';
+        det.appendChild(pre);
+        chatEl.appendChild(det);
+        chatEl.scrollTop = chatEl.scrollHeight;
+        return det;
+    }
+
+    function fillToolBlock(det, ok, text) {
+        det.classList.toggle('error', !ok);
+        det.querySelector('pre').textContent = (ok ? '' : 'ОШИБКА: ') + text;
+        chatEl.scrollTop = chatEl.scrollHeight;
+    }
+
+    // ----- Permission requests -----
+    const PERMISSION_LABELS = {
+        write_file: 'запись файла',
+        append_file: 'дописать в файл',
+        delete_file: 'удаление файла'
+    };
+    const pendingPermissions = new Map(); // requestId -> {div, actions, describe}
+
+    function addPermissionBlock(p) {
+        const label = PERMISSION_LABELS[p.action] || p.action;
+        const div = buildDecisionBubble(
+            'Агент запрашивает разрешение: ' + label + ' «' + p.file + '»'
+                + (p.preview ? '\n\nСодержимое (фрагмент):\n' + p.preview : ''),
+            p.id, 'Разрешить', 'Запретить',
+            (allowed) => (allowed ? '✅ Разрешено: ' : '⛔ Запрещено: ')
+                + label + ' «' + p.file + '»');
+        return div;
+    }
+
+    function addLimitBlock(d) {
+        buildDecisionBubble(
+            'Превышен лимит вызовов инструментов подряд (' + d.max
+                + '). Продолжить выполнение?',
+            d.requestId, 'Продолжить', 'Остановить',
+            (allowed) => allowed
+                ? '▶️ Продолжение разрешено — счётчик вызовов сброшен'
+                : '⏹ Выполнение остановлено пользователем');
+    }
+
+    function buildDecisionBubble(text, requestId, yesLabel, noLabel, describe) {
+        const div = document.createElement('div');
+        div.className = 'msg permission';
+        div.textContent = text;
+        const actions = document.createElement('div');
+        actions.className = 'perm-actions';
+        const yes = document.createElement('button');
+        yes.className = 'btn primary';
+        yes.textContent = yesLabel;
+        const no = document.createElement('button');
+        no.className = 'btn';
+        no.textContent = noLabel;
+        actions.appendChild(yes);
+        actions.appendChild(no);
+        div.appendChild(actions);
+        chatEl.appendChild(div);
+        chatEl.scrollTop = chatEl.scrollHeight;
+        pendingPermissions.set(requestId, { div, actions, describe });
+
+        const decide = (allow) => {
+            yes.disabled = true;
+            no.disabled = true;
+            fetch('/api/agent/permission', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ requestId, allow })
+            }).catch(() => showStatus('Не удалось отправить решение', true));
+        };
+        yes.addEventListener('click', () => decide(true));
+        no.addEventListener('click', () => decide(false));
+        return div;
+    }
+
+    function resolvePermissionBlock(id, allowed) {
+        const entry = pendingPermissions.get(id);
+        if (!entry) return;
+        pendingPermissions.delete(id);
+        entry.actions.remove();
+        entry.div.textContent = entry.describe(allowed);
+    }
+
+    // ----- Sending -----
+    function setBusy(value) {
+        busy = value;
+        sendBtn.disabled = value;
+        inputEl.disabled = value;
+        pauseBtn.style.display = value ? '' : 'none';
+        abortBtn.style.display = value ? '' : 'none';
+        if (!value) {
+            paused = false;
+            pauseBtn.textContent = 'Пауза';
+        }
+    }
+
+    pauseBtn.addEventListener('click', () => {
+        if (!sessionId) return;
+        const action = paused ? 'resume' : 'pause';
+        fetch('/api/agent/control', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId, action })
+        }).catch(() => showStatus('Не удалось выполнить действие', true));
+    });
+
+    abortBtn.addEventListener('click', () => {
+        if (!sessionId) return;
+        fetch('/api/agent/control', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId, action: 'abort' })
+        }).catch(() => showStatus('Не удалось прервать', true));
+    });
+
+    async function sendMessage() {
+        const text = inputEl.value.trim();
+        if (!text || busy) return;
+        inputEl.value = '';
+        addMessage(text, 'user');
+        setBusy(true);
+        setChatStatus('Агент думает…');
+
+        const payload = {
+            message: text,
+            compression: getCompression(),
+            contextMessages: parseInt(contextMessagesEl.value, 10) || 20,
+            maxToolCalls: parseInt(maxToolCallsEl.value, 10) || 5,
+            planning: planningEl.checked
+        };
+        if (sessionId) payload.sessionId = sessionId;
+
+        let assistantDiv = null;
+        let replyText = '';
+        const ensureAssistantDiv = () => {
+            if (!assistantDiv) {
+                assistantDiv = document.createElement('div');
+                assistantDiv.className = 'msg assistant md';
+                chatEl.appendChild(assistantDiv);
+                chatEl.scrollTop = chatEl.scrollHeight;
+            }
+            return assistantDiv;
+        };
+        let currentToolBlocks = {};
+        let gotDone = false;
+        planBlock = null;
+        closeReasoningBlock();
+
+        try {
+            const resp = await fetch('/api/agent/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            if (!resp.ok) {
+                const data = await resp.json().catch(() => ({}));
+                throw new Error(data.error || ('HTTP ' + resp.status));
+            }
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                let idx;
+                while ((idx = buffer.indexOf('\n\n')) >= 0) {
+                    const frame = parseSseEvent(buffer.slice(0, idx));
+                    buffer = buffer.slice(idx + 2);
+                    if (!frame) continue;
+                    if (frame.event === 'session') {
+                        sessionId = JSON.parse(frame.data).id;
+                    } else if (frame.event === 'token') {
+                        closeReasoningBlock();
+                        replyText += JSON.parse(frame.data).text;
+                        ensureAssistantDiv().innerHTML = renderMarkdown(replyText);
+                        chatEl.scrollTop = chatEl.scrollHeight;
+                    } else if (frame.event === 'reasoning') {
+                        const t = JSON.parse(frame.data).text;
+                        // Skip whitespace-only thinking noise until the block
+                        // exists — otherwise an empty "Мышление" bubble appears
+                        if (reasoningBlock || t.trim()) {
+                            ensureReasoningBlock();
+                            reasoningPre.textContent += t;
+                            chatEl.scrollTop = chatEl.scrollHeight;
+                        }
+                    } else if (frame.event === 'plan') {
+                        const d = JSON.parse(frame.data);
+                        // Only the INITIAL planning-phase event may replace a
+                        // partial bubble (legacy backends streamed the raw
+                        // planning JSON into it). Later plan updates — including
+                        // the end-of-turn "all done" event — must never touch
+                        // the bubble: they arrive right after the final answer.
+                        if (d.initial && assistantDiv) {
+                            assistantDiv.remove();
+                            assistantDiv = null;
+                            replyText = '';
+                        }
+                        closeReasoningBlock();
+                        renderPlan(d.steps);
+                        if (d.initial) {
+                            setChatStatus('План составлен — выполняю…');
+                        }
+                    } else if (frame.event === 'tool_call') {
+                        const d = JSON.parse(frame.data);
+                        if (d.prose) {
+                            // The model wrapped its call in prose — keep the
+                            // prose as a normal bubble, drop the raw JSON.
+                            // Detach the bubble afterwards: the next streamed
+                            // tokens are a NEW reply and must not append here.
+                            replyText = d.prose;
+                            ensureAssistantDiv().innerHTML = renderMarkdown(replyText);
+                            chatEl.scrollTop = chatEl.scrollHeight;
+                            assistantDiv = null;
+                            replyText = '';
+                        } else if (assistantDiv) {
+                            // The streamed tool-call JSON was rendered as a partial
+                            // bubble — replace it with a proper tool block
+                            assistantDiv.remove();
+                            assistantDiv = null;
+                            replyText = '';
+                        }
+                        closeReasoningBlock();
+                        currentToolBlocks[d.index] = addToolBlock(d.tool, d.args);
+                        setChatStatus('Выполняется инструмент: ' + d.tool + '…');
+                    } else if (frame.event === 'tool_result') {
+                        const d = JSON.parse(frame.data);
+                        const block = currentToolBlocks[d.index];
+                        if (block) {
+                            fillToolBlock(block, d.ok, d.text);
+                            delete currentToolBlocks[d.index];
+                        }
+                        setChatStatus('Агент думает…');
+                    } else if (frame.event === 'permission_request') {
+                        addPermissionBlock(JSON.parse(frame.data));
+                        setChatStatus('⏳ Ожидается ваше решение — разрешите или запретите операцию');
+                    } else if (frame.event === 'limit_confirm') {
+                        addLimitBlock(JSON.parse(frame.data));
+                        setChatStatus('⏳ Ожидается ваше решение — продолжить выполнение?');
+                    } else if (frame.event === 'permission_resolved') {
+                        const d = JSON.parse(frame.data);
+                        resolvePermissionBlock(d.id, d.allowed);
+                        setChatStatus('Агент думает…');
+                    } else if (frame.event === 'paused') {
+                        paused = true;
+                        pauseBtn.textContent = 'Продолжить';
+                        setChatStatus('Пауза: агент остановлен между шагами');
+                    } else if (frame.event === 'resumed') {
+                        paused = false;
+                        pauseBtn.textContent = 'Пауза';
+                        setChatStatus('Агент думает…');
+                    } else if (frame.event === 'limit') {
+                        const d = JSON.parse(frame.data);
+                        addMessage('Достигнут лимит вызовов инструментов подряд ('
+                            + d.max + '). Агент остановлен — уточните запрос.', 'error');
+                    } else if (frame.event === 'done') {
+                        gotDone = true;
+                        closeReasoningBlock();
+                        const d = JSON.parse(frame.data);
+                        const stats = d.stats || {};
+                        const ctx = d.context || {};
+                        let status = '';
+                        if (stats.totalTokens != null) {
+                            status += 'токены(total): ' + stats.totalTokens
+                                + ' · вызовов LLM: ' + (stats.llmCalls || 1)
+                                + (stats.toolCalls ? ' · инструментов: ' + stats.toolCalls : '');
+                        }
+                        if (ctx.totalMessages != null) {
+                            status += (status ? ' · ' : '') + 'контекст: '
+                                + ctx.keptMessages + '/' + ctx.totalMessages + ' сообщ.';
+                        }
+                        setChatStatus(d.aborted ? (status ? status + ' · прервано' : 'Прервано') : status);
+                    } else if (frame.event === 'error') {
+                        throw new Error(JSON.parse(frame.data).error || 'Ошибка агента');
+                    }
+                }
+            }
+            if (!replyText && assistantDiv) {
+                assistantDiv.remove();
+            }
+            if (!gotDone) {
+                // The stream closed without a done event (server restart,
+                // dropped connection) — unblock the input instead of hanging
+                setChatStatus('Соединение закрылось до завершения — можно отправить новый запрос');
+            }
+        } catch (e) {
+            closeReasoningBlock();
+            addMessage('Ошибка: ' + e.message, 'error');
+            setChatStatus('');
+        } finally {
+            setBusy(false);
+            inputEl.focus();
+        }
+    }
+
+    function parseSseEvent(raw) {
+        let event = 'message', data = '';
+        for (const line of raw.split('\n')) {
+            if (line.startsWith('event:')) event = line.slice(6).trim();
+            else if (line.startsWith('data:')) data += (data ? '\n' : '') + line.slice(5).trim();
+        }
+        return data ? { event, data } : null;
+    }
+
+    // ----- New dialog -----
+    document.getElementById('newChat').addEventListener('click', async () => {
+        if (sessionId) {
+            try {
+                await fetch('/api/agent/session?id=' + encodeURIComponent(sessionId),
+                    { method: 'DELETE' });
+            } catch (e) { /* best effort */ }
+        }
+        sessionId = null;
+        chatEl.innerHTML = '';
+        setChatStatus('');
+        pendingPermissions.clear();
+        showStatus('Новый диалог');
+    });
+
+    sendBtn.addEventListener('click', sendMessage);
+    inputEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
+
+    // ----- Frontend error logging -----
+    window.addEventListener('error', (e) => {
+        addMessage('Ошибка интерфейса: ' + e.message, 'error');
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+        const reason = e.reason instanceof Error ? e.reason.message : String(e.reason);
+        addMessage('Ошибка интерфейса: необработанный Promise: ' + reason, 'error');
+    });
+
+    addMessage('Агент готов. Могу назвать системное время, посчитать выражение и поработать '
+        + 'с файлами в директории test (запись и удаление — только с вашего разрешения).', 'system-note');
+    inputEl.focus();
+</script>
+</body>
+</html>

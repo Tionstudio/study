@@ -7,6 +7,8 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import ru.tionstudio.ai.advent.challenge.agent.AgentSession;
+import ru.tionstudio.ai.advent.challenge.agent.AgentTools;
 import ru.tionstudio.ai.advent.challenge.config.AppConfig;
 import ru.tionstudio.ai.advent.challenge.conversation.ConversationManager;
 import ru.tionstudio.ai.advent.challenge.conversation.ConversationStore;
@@ -25,6 +27,9 @@ import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -70,11 +75,18 @@ public class ChatServer {
     private final LlmClient analysisClient;
     private final PresetStore presetStore;
     private final ConversationManager conversationManager;
+    /** File/time tools for the agent page, sandboxed to the test/ directory. */
+    private final AgentTools agentTools;
+    /** Active agent sessions (in-memory; a session lives until "Новый диалог"). */
+    private final Map<String, AgentSession> agentSessions = new ConcurrentHashMap<>();
+    /** Pending file-operation permission requests: request id -> decision. */
+    private final Map<String, CompletableFuture<Boolean>> permissionRegistry = new ConcurrentHashMap<>();
 
     public ChatServer(int port, Map<String, LlmClient> clientsById,
                       List<AppConfig.ModelConfig> modelConfigs,
                       LlmClient defaultClient, LlmClient analysisClient,
-                      PresetStore presetStore, ConversationManager conversationManager) {
+                      PresetStore presetStore, ConversationManager conversationManager,
+                      AgentTools agentTools) {
         this.port = port;
         this.clientsById = clientsById;
         this.modelConfigs = modelConfigs;
@@ -82,11 +94,16 @@ public class ChatServer {
         this.analysisClient = analysisClient;
         this.presetStore = presetStore;
         this.conversationManager = conversationManager;
+        this.agentTools = agentTools;
     }
 
     public void start() throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/api/chat", this::handleChat);
+        server.createContext("/api/agent/chat", this::handleAgentChat);
+        server.createContext("/api/agent/permission", this::handleAgentPermission);
+        server.createContext("/api/agent/control", this::handleAgentControl);
+        server.createContext("/api/agent/session", this::handleAgentSession);
         server.createContext("/api/presets", this::handlePresets);
         server.createContext("/api/conversations", this::handleConversations);
         server.createContext("/api/models", this::handleModels);
@@ -148,6 +165,8 @@ public class ChatServer {
                 }
             }
             final String effectiveModel = client.model();
+            LOG.info("POST /api/chat: model=" + effectiveModel
+                    + ", message=" + abbreviate(message, 120));
 
             // Server-Sent Events: tokens are pushed to the page as they arrive
             exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
@@ -298,6 +317,194 @@ public class ChatServer {
     }
 
     /**
+     * {@code POST /api/agent/chat} — runs one turn of the tool-using agent.
+     * Body: {@code {"message": "...", "sessionId"?: "...", "compression"?:
+     * "none"|"lastN", "contextMessages"?: N, "maxToolCalls"?: N}}.
+     * SSE events: session, token, tool_call, tool_result, permission_request,
+     * permission_resolved, paused, resumed, limit, done, error.
+     */
+    private void handleAgentChat(HttpExchange exchange) throws IOException {
+        try {
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendJson(exchange, 405, errorJson("Method not allowed. Use POST."));
+                return;
+            }
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            JsonNode json = MAPPER.readTree(body);
+            String message = json.path("message").asText("").trim();
+            if (message.isEmpty()) {
+                sendJson(exchange, 400, errorJson("Field 'message' must not be empty."));
+                return;
+            }
+
+            String sessionId = json.path("sessionId").asText("").trim();
+            if (sessionId.isEmpty()) {
+                sessionId = UUID.randomUUID().toString();
+            }
+            final String sid = sessionId;
+            AgentSession session = agentSessions.computeIfAbsent(sid,
+                    k -> new AgentSession(k, defaultClient, agentTools, permissionRegistry));
+            LOG.info("POST /api/agent/chat: session=" + sid
+                    + ", message=" + abbreviate(message, 120));
+            session.updateSettings(new AgentSession.Settings(
+                    json.path("compression").asText("none"),
+                    json.path("contextMessages").asInt(0),
+                    json.path("maxToolCalls").asInt(0),
+                    json.path("planning").asBoolean(true)));
+
+            exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
+            exchange.getResponseHeaders().set("Cache-Control", "no-cache");
+            exchange.sendResponseHeaders(200, 0); // chunked transfer
+
+            try (OutputStream out = exchange.getResponseBody()) {
+                ScheduledExecutorService heartbeat = Executors.newSingleThreadScheduledExecutor();
+                heartbeat.scheduleAtFixedRate(() -> {
+                    try {
+                        synchronized (out) {
+                            out.write(HEARTBEAT_FRAME);
+                            out.flush();
+                        }
+                    } catch (IOException e) {
+                        LOG.warning("Agent client disconnected while waiting — closing stream");
+                        exchange.close();
+                    }
+                }, HEARTBEAT_INTERVAL_SECONDS, HEARTBEAT_INTERVAL_SECONDS, TimeUnit.SECONDS);
+                try {
+                    AgentSession.Listener listener = (event, data) -> {
+                        synchronized (out) {
+                            writeSse(out, event, data.toString());
+                        }
+                    };
+                    ObjectNode sessionJson = MAPPER.createObjectNode();
+                    sessionJson.put("id", sid);
+                    listener.on("session", sessionJson);
+                    session.runTurn(message, listener);
+                    LOG.info("Agent turn completed, session " + sid);
+                } finally {
+                    heartbeat.shutdownNow();
+                }
+            }
+        } catch (JsonProcessingException e) {
+            LOG.warning("Rejected /api/agent/chat request: malformed JSON body");
+            sendQuietly(exchange, 400, errorJson("Invalid JSON body."));
+        } catch (UncheckedIOException | IOException e) {
+            LOG.warning("Agent client disconnected during streaming: " + e.getMessage());
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "Agent request failed", e);
+            sendQuietly(exchange, 500, errorJson("Agent request failed: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * {@code POST /api/agent/permission} — resolves a pending file-operation
+     * permission request: {@code {"requestId": "...", "allow": true|false}}.
+     */
+    private void handleAgentPermission(HttpExchange exchange) throws IOException {
+        try {
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendJson(exchange, 405, errorJson("Method not allowed. Use POST."));
+                return;
+            }
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            JsonNode json = MAPPER.readTree(body);
+            String requestId = json.path("requestId").asText("").trim();
+            if (requestId.isEmpty()) {
+                sendJson(exchange, 400, errorJson("Field 'requestId' must not be empty."));
+                return;
+            }
+            CompletableFuture<Boolean> decision = permissionRegistry.get(requestId);
+            if (decision == null) {
+                sendJson(exchange, 404, errorJson(
+                        "Permission request not found or already resolved: " + requestId));
+                return;
+            }
+            boolean allow = json.path("allow").asBoolean(false);
+            decision.complete(allow);
+            LOG.info("Agent permission " + requestId + " resolved: " + (allow ? "allowed" : "denied"));
+            sendJson(exchange, 200, "{\"resolved\":true,\"allowed\":" + allow + "}");
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "Agent permission request failed", e);
+            sendQuietly(exchange, 500, errorJson("Permission request failed: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * {@code POST /api/agent/control} — pause/resume/abort a running agent
+     * session: {@code {"sessionId": "...", "action": "pause"|"resume"|"abort"}}.
+     */
+    private void handleAgentControl(HttpExchange exchange) throws IOException {
+        try {
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendJson(exchange, 405, errorJson("Method not allowed. Use POST."));
+                return;
+            }
+            String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+            JsonNode json = MAPPER.readTree(body);
+            String sessionId = json.path("sessionId").asText("").trim();
+            String action = json.path("action").asText("").trim();
+            AgentSession session = agentSessions.get(sessionId);
+            if (session == null) {
+                sendJson(exchange, 404, errorJson("Agent session not found: " + sessionId));
+                return;
+            }
+            switch (action) {
+                case "pause" -> session.pause();
+                case "resume" -> session.resume();
+                case "abort" -> session.abort();
+                default -> {
+                    sendJson(exchange, 400, errorJson(
+                            "Unknown action: '" + action + "'. Use pause | resume | abort."));
+                    return;
+                }
+            }
+            LOG.info("Agent session " + sessionId + ": control action " + action);
+            sendJson(exchange, 200, "{\"ok\":true,\"action\":\"" + action + "\"}");
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "Agent control request failed", e);
+            sendQuietly(exchange, 500, errorJson("Control request failed: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * {@code DELETE /api/agent/session?id=...} — drops an agent session
+     * ("Новый диалог" on the agent page).
+     */
+    private void handleAgentSession(HttpExchange exchange) throws IOException {
+        try {
+            if (!"DELETE".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendJson(exchange, 405, errorJson("Method not allowed. Use DELETE."));
+                return;
+            }
+            String id = null;
+            String rawQuery = exchange.getRequestURI().getRawQuery();
+            if (rawQuery != null) {
+                for (String pair : rawQuery.split("&")) {
+                    int eq = pair.indexOf('=');
+                    if (eq > 0 && pair.substring(0, eq).equals("id")) {
+                        id = java.net.URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
+                    }
+                }
+            }
+            if (id == null || id.isBlank()) {
+                sendJson(exchange, 400, errorJson("Query parameter 'id' is required."));
+                return;
+            }
+            AgentSession removed = agentSessions.remove(id);
+            if (removed != null) {
+                removed.abort();
+                LOG.info("DELETE /api/agent/session: " + id + " deleted");
+                sendJson(exchange, 200, "{\"deleted\":true}");
+            } else {
+                LOG.info("DELETE /api/agent/session: " + id + " not found");
+                sendJson(exchange, 404, errorJson("Agent session not found: " + id));
+            }
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "Agent session request failed", e);
+            sendQuietly(exchange, 500, errorJson("Session request failed: " + e.getMessage()));
+        }
+    }
+
+    /**
      * Writes one Server-Sent Events frame and flushes it immediately,
      * so the page receives tokens in real time.
      */
@@ -313,7 +520,10 @@ public class ChatServer {
     private void handlePresets(HttpExchange exchange) throws IOException {
         try {
             switch (exchange.getRequestMethod().toUpperCase()) {
-                case "GET" -> sendJson(exchange, 200, presetStore.listJson());
+                case "GET" -> {
+                    LOG.info("GET /api/presets");
+                    sendJson(exchange, 200, presetStore.listJson());
+                }
                 case "POST" -> {
                     String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
                     JsonNode json = MAPPER.readTree(body);
@@ -337,7 +547,10 @@ public class ChatServer {
                         sendJson(exchange, 400, errorJson("Query parameter 'id' must be a number."));
                         return;
                     }
-                    if (presetStore.delete(id)) {
+                    boolean deleted = presetStore.delete(id);
+                    LOG.info("DELETE /api/presets: id=" + id
+                            + (deleted ? " deleted" : " not found"));
+                    if (deleted) {
                         sendJson(exchange, 200, "{\"deleted\":true,\"id\":" + id + "}");
                     } else {
                         sendJson(exchange, 404, errorJson("Preset not found: id=" + id));
@@ -378,6 +591,7 @@ public class ChatServer {
             }
             switch (exchange.getRequestMethod().toUpperCase()) {
                 case "GET" -> {
+                    LOG.info("GET /api/conversations: id=" + id);
                     ConversationStore.Conversation conv = conversationManager.load(id);
                     if (conv == null) {
                         sendJson(exchange, 404, errorJson("Conversation not found: id=" + id));
@@ -393,7 +607,10 @@ public class ChatServer {
                     sendJson(exchange, 200, root.toString());
                 }
                 case "DELETE" -> {
-                    if (conversationManager.delete(id)) {
+                    boolean deleted = conversationManager.delete(id);
+                    LOG.info("DELETE /api/conversations: id=" + id
+                            + (deleted ? " deleted" : " not found"));
+                    if (deleted) {
                         sendJson(exchange, 200, "{\"deleted\":true}");
                     } else {
                         sendJson(exchange, 404, errorJson("Conversation not found: id=" + id));
@@ -498,6 +715,7 @@ public class ChatServer {
             sendJson(exchange, 405, errorJson("Method not allowed. Use GET."));
             return;
         }
+        LOG.fine("GET /api/models");
         ObjectNode root = MAPPER.createObjectNode();
         String defaultId = null;
         for (AppConfig.ModelConfig c : modelConfigs) {

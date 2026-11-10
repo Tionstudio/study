@@ -113,6 +113,18 @@ public class LlmClient {
     public ChatResult chatStream(List<Message> messagesToSend, ChatOptions options,
                                  Consumer<String> tokenConsumer, Consumer<String> reasoningConsumer)
             throws IOException, InterruptedException {
+        return chatStream(messagesToSend, options, tokenConsumer, reasoningConsumer, null);
+    }
+
+    /**
+     * Streaming call with connection tracking: once the HTTP connection is
+     * established the tracker receives its body stream (so a caller can abort
+     * the read by closing it), and {@code null} when the call ends.
+     */
+    public ChatResult chatStream(List<Message> messagesToSend, ChatOptions options,
+                                 Consumer<String> tokenConsumer, Consumer<String> reasoningConsumer,
+                                 Consumer<AutoCloseable> connectionTracker)
+            throws IOException, InterruptedException {
         ObjectNode payload = MAPPER.createObjectNode();
         payload.put("model", model);
         payload.put("stream", true);
@@ -208,6 +220,9 @@ public class LlmClient {
         String finishReason = null;
         int chunks = 0;
 
+        if (connectionTracker != null) {
+            connectionTracker.accept(response.body());
+        }
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(response.body(), StandardCharsets.UTF_8))) {
             String line;
@@ -254,6 +269,10 @@ public class LlmClient {
                     reasoningTokens = intOrNull(
                             usage.path("completion_tokens_details").path("reasoning_tokens"), reasoningTokens);
                 }
+            }
+        } finally {
+            if (connectionTracker != null) {
+                connectionTracker.accept(null);
             }
         }
 
