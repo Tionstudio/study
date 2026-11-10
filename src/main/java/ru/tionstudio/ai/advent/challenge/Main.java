@@ -1,6 +1,7 @@
 package ru.tionstudio.ai.advent.challenge;
 
 import ru.tionstudio.ai.advent.challenge.config.AppConfig;
+import ru.tionstudio.ai.advent.challenge.agent.AgentDialogStore;
 import ru.tionstudio.ai.advent.challenge.agent.AgentTools;
 import ru.tionstudio.ai.advent.challenge.conversation.ConversationManager;
 import ru.tionstudio.ai.advent.challenge.conversation.ConversationStore;
@@ -42,9 +43,11 @@ public class Main {
             ConversationStore conversationStore = new ConversationStore(Path.of("settings.db"));
             ConversationManager conversationManager = new ConversationManager(conversationStore, defaultClient);
             AgentTools agentTools = new AgentTools(Path.of("test"));
+            AgentDialogStore agentDialogStore = new AgentDialogStore(Path.of("settings.db"));
             LOG.info("Agent tools sandbox: " + agentTools.workDir());
             ChatServer server = new ChatServer(config.serverPort(), clients, modelConfigs,
-                    defaultClient, analysisClient, presetStore, conversationManager, agentTools);
+                    defaultClient, analysisClient, presetStore, conversationManager, agentTools,
+                    agentDialogStore);
             server.start();
         } catch (Exception e) {
             LOG.severe("Failed to start: " + e.getMessage());

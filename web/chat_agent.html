@@ -836,6 +836,69 @@
         return data ? { event, data } : null;
     }
 
+    // ----- Dialog restore (after application restart) -----
+    const PERMISSION_TEXT = {
+        write_file: 'запись файла',
+        append_file: 'дописать в файл',
+        delete_file: 'удаление файла'
+    };
+
+    function renderHistoryEntry(e) {
+        const p = e.payload || {};
+        switch (e.kind) {
+            case 'user':
+                planBlock = null; // each turn gets its own plan block
+                addMessage(p.text || '', 'user');
+                break;
+            case 'assistant':
+            case 'prose': {
+                const div = document.createElement('div');
+                div.className = 'msg assistant md';
+                div.innerHTML = renderMarkdown(p.text || '');
+                chatEl.appendChild(div);
+                break;
+            }
+            case 'tool': {
+                const det = addToolBlock(p.tool || '?', p.args || {});
+                det.open = false;
+                fillToolBlock(det, !!p.ok, p.text || '');
+                break;
+            }
+            case 'plan':
+                if (p.steps) renderPlan(p.steps);
+                break;
+            case 'permission': {
+                const div = document.createElement('div');
+                div.className = 'msg permission';
+                const label = PERMISSION_TEXT[p.action] || p.action || '';
+                div.textContent = (p.allowed ? '✅ Разрешено: ' : '⛔ Запрещено: ')
+                    + label + ' «' + (p.file || '') + '»';
+                chatEl.appendChild(div);
+                break;
+            }
+            case 'note':
+                addMessage(p.text || '', 'error');
+                break;
+        }
+    }
+
+    async function restoreDialog() {
+        try {
+            const resp = await fetch('/api/agent/history');
+            if (!resp.ok) return;
+            const data = await resp.json();
+            if (!data.sessionId || !data.entries || !data.entries.length) return;
+            sessionId = data.sessionId;
+            for (const e of data.entries) {
+                renderHistoryEntry(e);
+            }
+            addMessage('История диалога восстановлена — можно продолжить.', 'system-note');
+            chatEl.scrollTop = chatEl.scrollHeight;
+        } catch (e) {
+            // Restore is best-effort: the chat stays usable without it
+        }
+    }
+
     // ----- New dialog -----
     document.getElementById('newChat').addEventListener('click', async () => {
         if (sessionId) {
@@ -870,6 +933,7 @@
 
     addMessage('Агент готов. Могу назвать системное время, посчитать выражение и поработать '
         + 'с файлами в директории test (запись и удаление — только с вашего разрешения).', 'system-note');
+    restoreDialog();
     inputEl.focus();
 </script>
 </body>

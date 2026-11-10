@@ -9,6 +9,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import ru.tionstudio.ai.advent.challenge.agent.AgentSession;
 import ru.tionstudio.ai.advent.challenge.agent.AgentTools;
+import ru.tionstudio.ai.advent.challenge.agent.AgentDialogStore;
 import ru.tionstudio.ai.advent.challenge.config.AppConfig;
 import ru.tionstudio.ai.advent.challenge.conversation.ConversationManager;
 import ru.tionstudio.ai.advent.challenge.conversation.ConversationStore;
@@ -25,6 +26,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -77,6 +79,8 @@ public class ChatServer {
     private final ConversationManager conversationManager;
     /** File/time tools for the agent page, sandboxed to the test/ directory. */
     private final AgentTools agentTools;
+    /** Persistent storage of agent dialogs (transcript + LLM history). */
+    private final AgentDialogStore agentDialogStore;
     /** Active agent sessions (in-memory; a session lives until "Новый диалог"). */
     private final Map<String, AgentSession> agentSessions = new ConcurrentHashMap<>();
     /** Pending file-operation permission requests: request id -> decision. */
@@ -86,7 +90,7 @@ public class ChatServer {
                       List<AppConfig.ModelConfig> modelConfigs,
                       LlmClient defaultClient, LlmClient analysisClient,
                       PresetStore presetStore, ConversationManager conversationManager,
-                      AgentTools agentTools) {
+                      AgentTools agentTools, AgentDialogStore agentDialogStore) {
         this.port = port;
         this.clientsById = clientsById;
         this.modelConfigs = modelConfigs;
@@ -95,6 +99,7 @@ public class ChatServer {
         this.presetStore = presetStore;
         this.conversationManager = conversationManager;
         this.agentTools = agentTools;
+        this.agentDialogStore = agentDialogStore;
     }
 
     public void start() throws IOException {
@@ -104,6 +109,7 @@ public class ChatServer {
         server.createContext("/api/agent/permission", this::handleAgentPermission);
         server.createContext("/api/agent/control", this::handleAgentControl);
         server.createContext("/api/agent/session", this::handleAgentSession);
+        server.createContext("/api/agent/history", this::handleAgentHistory);
         server.createContext("/api/presets", this::handlePresets);
         server.createContext("/api/conversations", this::handleConversations);
         server.createContext("/api/models", this::handleModels);
@@ -317,6 +323,47 @@ public class ChatServer {
     }
 
     /**
+     * Creates (or restores) the agent session with the given id. When a
+     * stored dialog with this id exists, its LLM history is replayed into the
+     * fresh session so the dialog can be continued after a restart. Either
+     * way the session is bound to the persistent transcript.
+     */
+    private AgentSession createAgentSession(String sid) {
+        AgentSession session = new AgentSession(sid, defaultClient, agentTools, permissionRegistry);
+        session.setTranscriptListener(new AgentSession.TranscriptListener() {
+            @Override
+            public void onEntry(String kind, ObjectNode payload) {
+                agentDialogStore.appendEntry(sid, kind, payload.toString());
+            }
+
+            @Override
+            public void onHistory(String role, String content) {
+                ObjectNode json = MAPPER.createObjectNode();
+                json.put("role", role);
+                json.put("content", content);
+                agentDialogStore.appendEntry(sid, "history", json.toString());
+            }
+        });
+        if (agentDialogStore.dialogExists(sid)) {
+            List<AgentSession.HistoryEntry> restored = new ArrayList<>();
+            for (AgentDialogStore.StoredEntry e : agentDialogStore.loadEntries(sid, "history")) {
+                try {
+                    JsonNode json = MAPPER.readTree(e.payload());
+                    restored.add(new AgentSession.HistoryEntry(
+                            json.path("role").asText("user"),
+                            json.path("content").asText("")));
+                } catch (Exception ex) {
+                    LOG.warning("Skipping malformed history entry in dialog " + sid);
+                }
+            }
+            if (!restored.isEmpty()) {
+                session.restoreHistory(restored);
+            }
+        }
+        return session;
+    }
+
+    /**
      * {@code POST /api/agent/chat} — runs one turn of the tool-using agent.
      * Body: {@code {"message": "...", "sessionId"?: "...", "compression"?:
      * "none"|"lastN", "contextMessages"?: N, "maxToolCalls"?: N}}.
@@ -338,12 +385,19 @@ public class ChatServer {
             }
 
             String sessionId = json.path("sessionId").asText("").trim();
-            if (sessionId.isEmpty()) {
+            boolean newDialog = sessionId.isEmpty();
+            if (newDialog) {
                 sessionId = UUID.randomUUID().toString();
             }
             final String sid = sessionId;
-            AgentSession session = agentSessions.computeIfAbsent(sid,
-                    k -> new AgentSession(k, defaultClient, agentTools, permissionRegistry));
+            // The dialog row (and the "current dialog" pointer) must exist
+            // before the session starts persisting its transcript
+            if (newDialog || !agentDialogStore.dialogExists(sid)) {
+                agentDialogStore.createDialog(sid, abbreviate(message, 60));
+            } else {
+                agentDialogStore.setCurrentDialog(sid);
+            }
+            AgentSession session = agentSessions.computeIfAbsent(sid, this::createAgentSession);
             LOG.info("POST /api/agent/chat: session=" + sid
                     + ", message=" + abbreviate(message, 120));
             session.updateSettings(new AgentSession.Settings(
@@ -492,15 +546,61 @@ public class ChatServer {
             AgentSession removed = agentSessions.remove(id);
             if (removed != null) {
                 removed.abort();
+            }
+            // "Новый диалог": forget the pointer so the app does not restore
+            // this dialog after a restart. The stored transcript is kept for
+            // a future multi-dialog list.
+            agentDialogStore.clearCurrentDialog();
+            if (removed != null) {
                 LOG.info("DELETE /api/agent/session: " + id + " deleted");
                 sendJson(exchange, 200, "{\"deleted\":true}");
             } else {
                 LOG.info("DELETE /api/agent/session: " + id + " not found");
-                sendJson(exchange, 404, errorJson("Agent session not found: " + id));
+                sendJson(exchange, 200, "{\"deleted\":true}");
             }
         } catch (Exception e) {
             LOG.log(Level.SEVERE, "Agent session request failed", e);
             sendQuietly(exchange, 500, errorJson("Session request failed: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * {@code GET /api/agent/history} — returns the current (most recent)
+     * agent dialog so the page can re-render it after an application restart:
+     * {@code {"sessionId": "...", "entries": [{kind, payload}, ...]}}.
+     * The in-memory session is restored as well, so the dialog can simply be
+     * continued. Without a current dialog: {@code {"sessionId": null,
+     * "entries": []}}.
+     */
+    private void handleAgentHistory(HttpExchange exchange) throws IOException {
+        try {
+            if (!"GET".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendJson(exchange, 405, errorJson("Method not allowed. Use GET."));
+                return;
+            }
+            ObjectNode response = MAPPER.createObjectNode();
+            ArrayNode entries = response.putArray("entries");
+            String dialogId = agentDialogStore.currentDialogId();
+            if (dialogId != null && agentDialogStore.dialogExists(dialogId)) {
+                // Make sure the session is back in memory with its LLM history
+                agentSessions.computeIfAbsent(dialogId, this::createAgentSession);
+                response.put("sessionId", dialogId);
+                for (AgentDialogStore.StoredEntry e
+                        : agentDialogStore.loadEntriesExcept(dialogId, "history")) {
+                    ObjectNode entry = MAPPER.createObjectNode();
+                    entry.put("kind", e.kind());
+                    entry.set("payload", MAPPER.readTree(e.payload()));
+                    entries.add(entry);
+                }
+                LOG.info("GET /api/agent/history: dialog " + dialogId
+                        + ", " + entries.size() + " entries");
+            } else {
+                response.putNull("sessionId");
+            }
+            sendJson(exchange, 200, response.toString());
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "Agent history request failed", e);
+            sendQuietly(exchange, 500, errorJson("History request failed: " + e.getMessage()));
         }
     }
 

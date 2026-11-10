@@ -43,6 +43,21 @@ public class AgentSession {
         void on(String event, ObjectNode data) throws IOException;
     }
 
+    /**
+     * Persistence hook: everything needed to re-render the chat (transcript)
+     * and to rebuild the LLM context (history) after an application restart.
+     * Implemented by the server wiring; failures must not break the turn.
+     */
+    public interface TranscriptListener {
+        void onEntry(String kind, ObjectNode payload);
+
+        void onHistory(String role, String content);
+    }
+
+    /** One LLM-context entry for session restore (role: user|assistant|tool). */
+    public record HistoryEntry(String role, String content) {
+    }
+
     /** Session settings sent by the page with every message. */
     public record Settings(String compression, int contextMessages,
                            int maxToolCalls, boolean planning) {
@@ -75,6 +90,9 @@ public class AgentSession {
     private int maxToolCalls = 5;
     private boolean planning = true;
 
+    /** Persistence hook (set by the server when the session is created). */
+    private volatile TranscriptListener transcript;
+
     /** Current turn's plan (reset on every user message). */
     private List<PlanStep> plan = new ArrayList<>();
 
@@ -97,6 +115,54 @@ public class AgentSession {
 
     public String id() {
         return id;
+    }
+
+    public void setTranscriptListener(TranscriptListener listener) {
+        this.transcript = listener;
+    }
+
+    /** Rebuilds the LLM context from entries stored before a restart. */
+    public void restoreHistory(List<HistoryEntry> entries) {
+        history.clear();
+        for (HistoryEntry e : entries) {
+            history.add(new Entry(e.role(), e.content()));
+        }
+        LOG.info("Agent session " + id + ": history restored, "
+                + history.size() + " entries");
+    }
+
+    /** Persists a transcript entry; persistence errors are logged, not thrown. */
+    private void emitTranscript(String kind, ObjectNode payload) {
+        TranscriptListener t = transcript;
+        if (t == null) {
+            return;
+        }
+        try {
+            t.onEntry(kind, payload);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Agent session " + id
+                    + ": failed to persist transcript entry " + kind, e);
+        }
+    }
+
+    /** Persists one LLM-context entry; errors are logged, not thrown. */
+    private void emitHistory(String role, String content) {
+        TranscriptListener t = transcript;
+        if (t == null) {
+            return;
+        }
+        try {
+            t.onHistory(role, content);
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Agent session " + id
+                    + ": failed to persist history entry", e);
+        }
+    }
+
+    private void emitTranscriptText(String kind, String text) {
+        ObjectNode json = MAPPER.createObjectNode();
+        json.put("text", text);
+        emitTranscript(kind, json);
     }
 
     public void updateSettings(Settings s) {
@@ -158,6 +224,8 @@ public class AgentSession {
         pauseRequested = false;
         activeLlmConnection = null;
         history.add(new Entry("user", userMessage));
+        emitHistory("user", userMessage);
+        emitTranscriptText("user", userMessage);
         plan = new ArrayList<>();
 
         int consecutiveToolCalls = 0;
@@ -225,6 +293,8 @@ public class AgentSession {
                 if (calls.isEmpty()) {
                     // Regular text — the final answer of this turn
                     history.add(new Entry("assistant", reply));
+                    emitHistory("assistant", reply);
+                    emitTranscriptText("assistant", reply);
                     markPlanDone();
                     emitPlan(listener);
                     emitDone(listener, totalPrompt, totalCompletion, hasUsage,
@@ -237,6 +307,10 @@ public class AgentSession {
                 // instead of the raw payload bubble.
                 String prose = parsed.prose();
                 history.add(new Entry("assistant", reply));
+                emitHistory("assistant", reply);
+                if (prose != null && !prose.isBlank()) {
+                    emitTranscriptText("prose", prose);
+                }
                 long realCalls = calls.stream()
                         .filter(c -> !"update_plan".equals(c.tool())).count();
                 consecutiveToolCalls += (int) realCalls;
@@ -253,6 +327,8 @@ public class AgentSession {
                         ObjectNode json = MAPPER.createObjectNode();
                         json.put("max", maxToolCalls);
                         listener.on("limit", json);
+                        emitTranscriptText("note", "Достигнут лимит вызовов инструментов подряд ("
+                                + maxToolCalls + "). Агент остановлен — уточните запрос.");
                         LOG.warning("Agent session " + id + ": tool-call limit (" + maxToolCalls
                                 + ") exceeded, user stopped the run");
                         emitDone(listener, totalPrompt, totalCompletion, hasUsage,
@@ -330,9 +406,17 @@ public class AgentSession {
                     return;
                 }
                 for (int i = 0; i < results.size(); i++) {
-                    history.add(new Entry("tool", "[результат инструмента " + calls.get(i).tool()
+                    String note = "[результат инструмента " + calls.get(i).tool()
                             + (results.get(i).ok() ? "" : " — ОШИБКА") + "]: "
-                            + results.get(i).text()));
+                            + results.get(i).text();
+                    history.add(new Entry("tool", note));
+                    emitHistory("tool", note);
+                    ObjectNode toolEntry = MAPPER.createObjectNode();
+                    toolEntry.put("tool", calls.get(i).tool());
+                    toolEntry.set("args", calls.get(i).args());
+                    toolEntry.put("ok", results.get(i).ok());
+                    toolEntry.put("text", results.get(i).text());
+                    emitTranscript("tool", toolEntry);
                 }
 
                 // Pause between steps: the in-flight LLM request has already
@@ -480,6 +564,12 @@ public class AgentSession {
             resolved.put("allowed", allowed);
             listener.on("permission_resolved", resolved);
 
+            ObjectNode permEntry = MAPPER.createObjectNode();
+            permEntry.put("action", call.tool());
+            permEntry.put("file", call.args().path("name").asText(""));
+            permEntry.put("allowed", allowed);
+            emitTranscript("permission", permEntry);
+
             if (!allowed) {
                 return new AgentTools.ToolResult(false,
                         "Пользователь запретил операцию " + call.tool() + ".");
@@ -584,6 +674,7 @@ public class AgentSession {
         json.set("steps", steps);
         json.put("initial", initial);
         listener.on("plan", json);
+        emitTranscript("plan", json);
     }
 
     /**
