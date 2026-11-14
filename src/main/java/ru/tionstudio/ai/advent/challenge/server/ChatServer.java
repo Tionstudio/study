@@ -382,6 +382,19 @@ public class ChatServer {
                     LOG.warning("Skipping malformed usage entry in dialog " + sid);
                 }
             }
+            // Restore the dialog summary (last summary entry, "summary" mode)
+            List<AgentDialogStore.StoredEntry> summaries =
+                    agentDialogStore.loadEntries(sid, "summary");
+            if (!summaries.isEmpty()) {
+                try {
+                    JsonNode json = MAPPER.readTree(
+                            summaries.get(summaries.size() - 1).payload());
+                    session.restoreSummary(json.path("text").asText(""),
+                            json.path("coveredCounted").asInt(0));
+                } catch (Exception ex) {
+                    LOG.warning("Skipping malformed summary entry in dialog " + sid);
+                }
+            }
         }
         return session;
     }
@@ -389,7 +402,8 @@ public class ChatServer {
     /**
      * {@code POST /api/agent/chat} — runs one turn of the tool-using agent.
      * Body: {@code {"message": "...", "sessionId"?: "...", "compression"?:
-     * "none"|"lastN", "contextMessages"?: N, "maxToolCalls"?: N}}.
+     * "none"|"lastN", "contextMessages"?: N, "maxToolCalls"?: N,
+     * "planning"?: bool, "tools"?: bool}}.
      * SSE events: session, token, tool_call, tool_result, permission_request,
      * permission_resolved, paused, resumed, limit, done, error.
      */
@@ -427,7 +441,10 @@ public class ChatServer {
                     json.path("compression").asText("none"),
                     json.path("contextMessages").asInt(0),
                     json.path("maxToolCalls").asInt(0),
-                    json.path("planning").asBoolean(true)));
+                    json.path("planning").asBoolean(true),
+                    json.path("summaryKeep").asInt(0),
+                    json.path("summaryEvery").asInt(0),
+                    json.path("tools").asBoolean(true)));
 
             exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
             exchange.getResponseHeaders().set("Cache-Control", "no-cache");
@@ -619,6 +636,11 @@ public class ChatServer {
                     if ("turnstats".equals(e.kind())) {
                         // Last turn's done-payload — restores the status line
                         response.set("lastTurn", MAPPER.readTree(e.payload()));
+                        continue;
+                    }
+                    if ("summary".equals(e.kind())) {
+                        // Not a chat entry — returned separately (memory panel)
+                        response.set("summary", MAPPER.readTree(e.payload()));
                         continue;
                     }
                     ObjectNode entry = MAPPER.createObjectNode();

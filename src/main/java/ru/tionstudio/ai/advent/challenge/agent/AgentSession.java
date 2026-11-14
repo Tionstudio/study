@@ -27,8 +27,10 @@ import java.util.logging.Logger;
  * <ul>
  *   <li>the system prompt (tool contract) is pinned at the head of the context
  *       and is never compressed;</li>
- *   <li>context compression: "none" or "lastN" — the window counts only
- *       user/assistant messages, tool records are kept with their turn;</li>
+ *   <li>context compression: "none", "lastN" or "summary" — the window
+ *       counts only user/assistant messages, tool records are kept with
+ *       their turn; in "summary" mode the older part is replaced by an
+ *       LLM-written summary stored separately from the history;</li>
  *   <li>tool calls are validated before execution;</li>
  *   <li>write/append/delete require explicit per-operation user permission;</li>
  *   <li>the number of consecutive tool calls is limited (default 5);</li>
@@ -60,7 +62,9 @@ public class AgentSession {
 
     /** Session settings sent by the page with every message. */
     public record Settings(String compression, int contextMessages,
-                           int maxToolCalls, boolean planning) {
+                           int maxToolCalls, boolean planning,
+                           int summaryKeep, int summaryEvery,
+                           boolean toolsEnabled) {
     }
 
     private record Entry(String role, String content) {
@@ -76,6 +80,12 @@ public class AgentSession {
     /** Permission requests time out after this long and count as denied. */
     private static final long PERMISSION_TIMEOUT_MINUTES = 5;
 
+    /**
+     * How many times in a row the model may answer with an unparseable
+     * tool call before the turn is ended with an explanatory note.
+     */
+    private static final int MAX_BROKEN_REPLIES = 3;
+
     private final String id;
     private final LlmClient client;
     private final AgentTools tools;
@@ -89,6 +99,22 @@ public class AgentSession {
     private int contextMessages = 20;
     private int maxToolCalls = 5;
     private boolean planning = true;
+    /**
+     * When false, the session behaves as a plain chat: no tools in the
+     * system prompt and no tool-call parsing — every reply is a final answer.
+     */
+    private volatile boolean toolsEnabled = true;
+    /** "summary" mode: last N user/assistant messages stay as-is. */
+    private int summaryKeep = 5;
+    /** "summary" mode: the summary is regenerated every M new messages. */
+    private int summaryEvery = 10;
+    /**
+     * "summary" mode: compressed older part of the dialog. Stored separately
+     * from the history and sent INSTEAD of the entries it covers.
+     */
+    private String summary = "";
+    /** How many user/assistant messages the summary currently covers. */
+    private int summaryCoveredCounted;
 
     /** Persistence hook (set by the server when the session is created). */
     private volatile TranscriptListener transcript;
@@ -102,6 +128,9 @@ public class AgentSession {
 
     /** Start of the current turn (for the duration shown in the status). */
     private long turnStartNanos;
+
+    /** Prompt tokens of the latest LLM call (-1 = none yet this turn). */
+    private int lastPromptTokens = -1;
 
     /** Model context window in tokens (0 = unknown, no fill warnings). */
     private int contextWindow;
@@ -150,6 +179,12 @@ public class AgentSession {
     public void restoreUsage(int promptTokens, int completionTokens) {
         this.sessionPromptTokens = promptTokens;
         this.sessionCompletionTokens = completionTokens;
+    }
+
+    /** Restores the dialog summary stored before a restart ("summary" mode). */
+    public void restoreSummary(String text, int coveredCounted) {
+        this.summary = text == null ? "" : text;
+        this.summaryCoveredCounted = Math.max(0, coveredCounted);
     }
 
     /** Sets the model context window (tokens) for fill-level warnings. */
@@ -233,7 +268,8 @@ public class AgentSession {
         if (s == null) {
             return;
         }
-        if ("lastN".equals(s.compression()) || "none".equals(s.compression())) {
+        if ("lastN".equals(s.compression()) || "none".equals(s.compression())
+                || "summary".equals(s.compression())) {
             this.compression = s.compression();
         }
         if (s.contextMessages() > 0) {
@@ -242,7 +278,14 @@ public class AgentSession {
         if (s.maxToolCalls() > 0) {
             this.maxToolCalls = Math.min(s.maxToolCalls(), 50);
         }
+        if (s.summaryKeep() > 0) {
+            this.summaryKeep = Math.min(s.summaryKeep(), 100);
+        }
+        if (s.summaryEvery() > 0) {
+            this.summaryEvery = Math.min(s.summaryEvery(), 200);
+        }
         this.planning = s.planning();
+        this.toolsEnabled = s.toolsEnabled();
     }
 
     /**
@@ -299,6 +342,7 @@ public class AgentSession {
         pauseRequested = false;
         activeLlmConnection = null;
         turnStartNanos = System.nanoTime();
+        lastPromptTokens = -1;
         history.add(new Entry("user", userMessage));
         emitHistory("user", userMessage);
         emitTranscriptText("user", userMessage);
@@ -306,6 +350,7 @@ public class AgentSession {
 
         int consecutiveToolCalls = 0;
         int totalToolCalls = 0;
+        int brokenReplies = 0; // consecutive unparseable tool-call attempts
         int totalPrompt = 0, totalCompletion = 0, llmCalls = 0;
         int lastCallCompletion = -1; // completion tokens of the latest LLM call
         boolean hasUsage = false;
@@ -333,6 +378,7 @@ public class AgentSession {
                 llmCalls++;
                 if (planResult.promptTokens() != null) {
                     totalPrompt += planResult.promptTokens();
+                    lastPromptTokens = planResult.promptTokens();
                     hasUsage = true;
                 }
                 if (planResult.completionTokens() != null) {
@@ -348,6 +394,23 @@ public class AgentSession {
                 LOG.info("Agent session " + id + ": plan, " + plan.size() + " steps");
             }
 
+            // ----- Summary maintenance (compression "summary") -----
+            if (!aborted) {
+                LlmClient.ChatResult sumResult = updateSummaryIfNeeded(listener);
+                if (sumResult != null) {
+                    llmCalls++;
+                    if (sumResult.promptTokens() != null) {
+                        totalPrompt += sumResult.promptTokens();
+                        lastPromptTokens = sumResult.promptTokens();
+                        hasUsage = true;
+                    }
+                    if (sumResult.completionTokens() != null) {
+                        totalCompletion += sumResult.completionTokens();
+                        hasUsage = true;
+                    }
+                }
+            }
+
             // ----- Execution loop -----
             while (true) {
                 LlmClient.ChatResult result = callLlm(buildMessages(), listener, true);
@@ -361,6 +424,7 @@ public class AgentSession {
                 llmCalls++;
                 if (result.promptTokens() != null) {
                     totalPrompt += result.promptTokens();
+                    lastPromptTokens = result.promptTokens();
                     hasUsage = true;
                 }
                 checkContextFill(result.promptTokens(), listener);
@@ -371,9 +435,51 @@ public class AgentSession {
                 }
 
                 String reply = result.reply() == null ? "" : result.reply().trim();
-                AgentProtocol.ParseResult parsed = AgentProtocol.parseFull(reply);
+                // Tools disabled (dialog-script plain-chat mode): every reply
+                // is a final answer, the tool protocol is not applied at all
+                AgentProtocol.ParseResult parsed = toolsEnabled
+                        ? AgentProtocol.parseFull(reply)
+                        : new AgentProtocol.ParseResult(List.of(), "");
                 List<AgentProtocol.ToolCall> calls = parsed.calls();
+                if (toolsEnabled && calls.isEmpty() && AgentProtocol.looksLikeToolCall(reply)) {
+                    // The model tried to call a tool but produced unparseable
+                    // JSON: the raw payload must NOT become a normal chat
+                    // answer — flag it as a protocol error and let the model
+                    // retry (bounded by MAX_BROKEN_REPLIES)
+                    brokenReplies++;
+                    history.add(new Entry("assistant", reply));
+                    emitHistory("assistant", reply);
+                    ObjectNode err = MAPPER.createObjectNode();
+                    err.put("text", reply);
+                    err.put("attempt", brokenReplies);
+                    err.put("maxAttempts", MAX_BROKEN_REPLIES);
+                    listener.on("reply_error", err);
+                    emitTranscript("reply_error", err);
+                    LOG.warning("Agent session " + id + ": unparseable tool call, attempt "
+                            + brokenReplies + "/" + MAX_BROKEN_REPLIES + ": "
+                            + abbreviate(reply, 200));
+                    if (brokenReplies >= MAX_BROKEN_REPLIES) {
+                        ObjectNode note = MAPPER.createObjectNode();
+                        note.put("text", "Модель " + MAX_BROKEN_REPLIES
+                                + " раз(а) подряд прислала повреждённый вызов инструмента"
+                                + " — ход завершён. Попробуйте переформулировать запрос.");
+                        listener.on("note", note);
+                        emitTranscript("note", note);
+                        emitDone(listener, totalPrompt, totalCompletion, hasUsage,
+                                llmCalls, totalToolCalls, false, lastCallCompletion);
+                        return;
+                    }
+                    String feedback = "[ошибка протокола]: Ваш предыдущий ответ похож на "
+                            + "вызов инструмента, но не распознан — JSON повреждён. "
+                            + "Повторите вызов СТРОГО одним JSON-объектом "
+                            + "{\"tool\": \"<имя>\", \"args\": {...}} без markdown и без "
+                            + "пояснений — или дайте финальный ответ обычным текстом.";
+                    history.add(new Entry("tool", feedback));
+                    emitHistory("tool", feedback);
+                    continue;
+                }
                 if (calls.isEmpty()) {
+                    brokenReplies = 0;
                     // Regular text — the final answer of this turn
                     String finalReply = reply;
                     if ("length".equals(result.finishReason())) {
@@ -414,6 +520,7 @@ public class AgentSession {
                 // The model wants tools (one object or a parallel array).
                 // Any prose it wrote around the call JSON is shown in the chat
                 // instead of the raw payload bubble.
+                brokenReplies = 0;
                 String prose = parsed.prose();
                 history.add(new Entry("assistant", reply));
                 emitHistory("assistant", reply);
@@ -793,8 +900,14 @@ public class AgentSession {
      */
     private List<LlmClient.Message> buildMessages() {
         List<Entry> window = historyWindow();
-        List<LlmClient.Message> messages = new ArrayList<>(window.size() + 1);
-        messages.add(new LlmClient.Message("system", AgentProtocol.systemPrompt()));
+        List<LlmClient.Message> messages = new ArrayList<>(window.size() + 2);
+        messages.add(new LlmClient.Message("system", AgentProtocol.systemPrompt(toolsEnabled)));
+        if ("summary".equals(compression) && !summary.isBlank()) {
+            // The summary is sent INSTEAD of the history entries it covers
+            messages.add(new LlmClient.Message("user",
+                    "Краткое содержание предыдущей части диалога (автоматическое summary):\n"
+                            + summary));
+        }
         for (Entry e : window) {
             String role = switch (e.role()) {
                 case "user", "assistant" -> e.role();
@@ -808,6 +921,13 @@ public class AgentSession {
     private List<Entry> historyWindow() {
         if ("none".equals(compression)) {
             return history;
+        }
+        if ("summary".equals(compression)) {
+            // Everything the summary covers is replaced by the summary text
+            // (injected in buildMessages); the rest of the history goes as-is
+            return history.subList(
+                    cutIndexForCounted(Math.min(summaryCoveredCounted, countedMessages())),
+                    history.size());
         }
         int n = Math.max(1, contextMessages);
         int counted = 0;
@@ -827,6 +947,130 @@ public class AgentSession {
             cut++;
         }
         return history.subList(cut, history.size());
+    }
+
+    /** Number of user/assistant entries in the history (tool records excluded). */
+    private int countedMessages() {
+        int c = 0;
+        for (Entry e : history) {
+            if ("user".equals(e.role()) || "assistant".equals(e.role())) {
+                c++;
+            }
+        }
+        return c;
+    }
+
+    /**
+     * History index of the (covered + 1)-th user/assistant message — the
+     * start of the window when {@code covered} counted messages are
+     * replaced by the summary.
+     */
+    private int cutIndexForCounted(int covered) {
+        if (covered <= 0) {
+            return 0;
+        }
+        int c = 0;
+        for (int i = 0; i < history.size(); i++) {
+            Entry e = history.get(i);
+            if ("user".equals(e.role()) || "assistant".equals(e.role())) {
+                c++;
+                if (c > covered) {
+                    return i;
+                }
+            }
+        }
+        return history.size();
+    }
+
+    /** Max chars of one history entry included in a summary-update prompt. */
+    private static final int SUMMARY_ENTRY_MAX_CHARS = 800;
+
+    /**
+     * Summary maintenance for the "summary" compression mode. When the
+     * backlog of counted messages not yet covered by the summary reaches
+     * {@code summaryEvery}, the LLM rewrites the summary, extending its
+     * coverage by ONE batch of {@code summaryEvery} messages (bounded steps
+     * keep the regeneration prompt inside the model's context window; a huge
+     * backlog is caught up over several turns). If the batch call fails, one
+     * retry with a 2-message batch is attempted; a persistent failure is
+     * reported to the chat. Returns the call's result so its tokens can be
+     * included in the turn statistics (null when no update was needed).
+     */
+    private LlmClient.ChatResult updateSummaryIfNeeded(Listener listener) throws IOException {
+        if (!"summary".equals(compression)) {
+            return null;
+        }
+        int countedTotal = countedMessages();
+        int every = Math.max(1, summaryEvery);
+        int target = Math.max(0, countedTotal - Math.max(1, summaryKeep));
+        if (target - summaryCoveredCounted < every) {
+            return null;
+        }
+        int batchTarget = Math.min(target, summaryCoveredCounted + every);
+        LlmClient.ChatResult result = tryUpdateSummary(batchTarget, listener);
+        if (result == null && !aborted && batchTarget - summaryCoveredCounted > 2) {
+            // Possibly a few huge tool outputs blew the context window —
+            // retry with a minimal batch
+            LOG.info("Agent session " + id + ": summary update with batch of "
+                    + (batchTarget - summaryCoveredCounted) + " failed, retrying with batch of 2");
+            result = tryUpdateSummary(summaryCoveredCounted + 2, listener);
+        }
+        if (result == null && !aborted) {
+            ObjectNode note = MAPPER.createObjectNode();
+            note.put("text", "Не удалось обновить summary: вызов LLM завершился ошибкой"
+                    + " (возможно, промпт суммаризации не помещается в контекстное окно"
+                    + " модели). Диалог продолжается со старым summary.");
+            listener.on("note", note);
+            emitTranscript("note", note);
+        }
+        return result;
+    }
+
+    /**
+     * One summary regeneration attempt covering the history up to
+     * {@code newCovered} counted messages. Long entries (tool outputs) are
+     * truncated so the prompt stays compact. On success the summary is
+     * stored, pushed to the page and persisted; returns null on failure.
+     */
+    private LlmClient.ChatResult tryUpdateSummary(int newCovered, Listener listener)
+            throws IOException {
+        StringBuilder prompt = new StringBuilder();
+        prompt.append("Ты сжимаешь историю диалога, чтобы она помещалась в контекстное окно.\n")
+                .append("Ниже дано прежнее краткое содержание диалога (может отсутствовать) ")
+                .append("и новые сообщения, которые нужно в него добавить.\n\n")
+                .append("Составь обновлённое краткое содержание: сохрани все важные факты, ")
+                .append("решения, имена файлов, числа, промежуточные результаты и намерения ")
+                .append("пользователя, нужные для продолжения работы. Пиши кратко, по-русски. ")
+                .append("Ответь ТОЛЬКО обновлённым содержанием, без пояснений.\n\n");
+        if (!summary.isBlank()) {
+            prompt.append("Прежнее краткое содержание:\n").append(summary).append("\n\n");
+        }
+        prompt.append("Новые сообщения:\n");
+        int from = cutIndexForCounted(summaryCoveredCounted);
+        int to = cutIndexForCounted(newCovered);
+        for (int i = from; i < to; i++) {
+            Entry e = history.get(i);
+            prompt.append('[').append(e.role()).append("]: ")
+                    .append(abbreviate(e.content(), SUMMARY_ENTRY_MAX_CHARS)).append("\n");
+        }
+        LlmClient.ChatResult result = callLlm(
+                List.of(new LlmClient.Message("user", prompt.toString())), listener, false);
+        if (result == null || result.reply() == null || result.reply().isBlank()) {
+            LOG.warning("Agent session " + id + ": summary update failed (batch to "
+                    + newCovered + " messages), keeping the previous summary");
+            return null;
+        }
+        summary = result.reply().trim();
+        summaryCoveredCounted = newCovered;
+        ObjectNode json = MAPPER.createObjectNode();
+        json.put("text", summary);
+        json.put("coveredCounted", summaryCoveredCounted);
+        // Push to the page (memory panel) and persist for restart restore
+        listener.on("summary", json);
+        emitTranscript("summary", json);
+        LOG.info("Agent session " + id + ": summary updated, covers " + summaryCoveredCounted
+                + " of " + countedMessages() + " messages (" + summary.length() + " chars)");
+        return result;
     }
 
     /** Messages currently inside the context window (for the status line). */
@@ -871,6 +1115,18 @@ public class AgentSession {
         ObjectNode context = MAPPER.createObjectNode();
         context.put("keptMessages", keptMessages());
         context.put("totalMessages", totalMessages());
+        if ("summary".equals(compression) && summaryCoveredCounted > 0) {
+            // How many user/assistant messages the summary currently
+            // replaces — shown in the turn status line
+            context.put("summaryCovered", summaryCoveredCounted);
+        }
+        if (contextWindow > 0 && lastPromptTokens >= 0) {
+            // Context-window fill of the latest LLM call — the page shows
+            // it as a chip with yellow/red highlight near the limit
+            context.put("windowPct", (int) (lastPromptTokens * 100L / contextWindow));
+            context.put("windowTokens", lastPromptTokens);
+            context.put("windowSize", contextWindow);
+        }
         done.set("context", context);
         done.put("aborted", abortedRun);
         done.put("durationMs", (System.nanoTime() - turnStartNanos) / 1_000_000);

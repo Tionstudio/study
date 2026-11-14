@@ -52,6 +52,21 @@ public class AgentProtocol {
 
     /** System prompt pinned at the head of the agent's context (never compressed). */
     public static String systemPrompt() {
+        return systemPrompt(true);
+    }
+
+    /**
+     * System prompt for the agent. With tools disabled the model is told to
+     * behave as a plain chat assistant and to never emit tool-call JSON.
+     */
+    public static String systemPrompt(boolean withTools) {
+        if (!withTools) {
+            return """
+                    Ты — ассистент-помощник. Отвечай на сообщения пользователя обычным текстом, кратко и по делу.
+                    У тебя НЕТ доступа к инструментам, файлам и системному времени — не выдавай JSON и не пытайся вызывать инструменты.
+                    Если пользователь просит запомнить факт — подтверди кратко и учитывай этот факт в дальнейших ответах.
+                    """;
+        }
         return """
                 Ты — агент-помощник с доступом к инструментам на сервере пользователя.
 
@@ -199,6 +214,9 @@ public class AgentProtocol {
             }
             text = text.trim();
         }
+        // Weak models sometimes drop the opening '{' (and even the opening
+        // quote) of the call object: {"tool": ... arrives as tool": ... }
+        text = repairBareToolKeys(text);
         boolean looksJson = (text.startsWith("{") && text.endsWith("}"))
                 || (text.startsWith("[") && text.endsWith("]"));
         if (looksJson) {
@@ -233,6 +251,81 @@ public class AgentProtocol {
             JsonNode args = json.path("args");
             calls.add(new ToolCall(tool.asText(),
                     args.isObject() ? args : MAPPER.createObjectNode()));
+        }
+    }
+
+    /**
+     * Repairs the most common structural damage in weak models' tool calls:
+     * a dropped '{' that opens the call object and/or a dropped opening
+     * quote of the "tool" key. Inserts the missing pieces before every
+     * bare "tool" key; occurrences inside string literals are left alone.
+     */
+    private static String repairBareToolKeys(String text) {
+        StringBuilder out = new StringBuilder(text.length() + 8);
+        boolean inString = false, escaped = false;
+        int i = 0;
+        while (i < text.length()) {
+            char c = text.charAt(i);
+            if (escaped) {
+                out.append(c);
+                escaped = false;
+                i++;
+                continue;
+            }
+            if (c == '\\' && inString) {
+                out.append(c);
+                escaped = true;
+                i++;
+                continue;
+            }
+            if (!inString) {
+                // Quoted key: "tool" followed (after optional spaces) by ':'
+                if (c == '"' && text.startsWith("\"tool\"", i)
+                        && isKeyColon(text, i + 6)) {
+                    insertBraceIfBare(out);
+                    out.append(text, i, i + 6);
+                    i += 6;
+                    continue;
+                }
+                // Unquoted key: tool" — the opening quote was dropped
+                if (c == 't' && text.startsWith("tool\"", i)
+                        && isKeyColon(text, i + 5)) {
+                    insertBraceIfBare(out);
+                    out.append('"').append(text, i, i + 5);
+                    i += 5;
+                    continue;
+                }
+            }
+            if (c == '"') {
+                inString = !inString;
+            }
+            out.append(c);
+            i++;
+        }
+        return out.toString();
+    }
+
+    /** True when the next non-space character at {@code from} is ':'. */
+    private static boolean isKeyColon(String text, int from) {
+        int j = from;
+        while (j < text.length() && Character.isWhitespace(text.charAt(j))) {
+            j++;
+        }
+        return j < text.length() && text.charAt(j) == ':';
+    }
+
+    /**
+     * Appends '{' when the last non-space character already emitted is not
+     * '{' or ',' — i.e. the "tool" key does not open its object.
+     */
+    private static void insertBraceIfBare(StringBuilder out) {
+        int j = out.length() - 1;
+        while (j >= 0 && Character.isWhitespace(out.charAt(j))) {
+            j--;
+        }
+        char prev = j >= 0 ? out.charAt(j) : ' ';
+        if (prev != '{' && prev != ',') {
+            out.append('{');
         }
     }
 
@@ -305,6 +398,23 @@ public class AgentProtocol {
         // Drop leftover markdown fence markers from the prose
         prose = prose.replace("```json", "").replace("```", "").trim();
         return prose;
+    }
+
+    /**
+     * Heuristic: the reply was MEANT to be a tool call (it carries a "tool"
+     * key, quoted or with a dropped opening quote) but could not be parsed
+     * into any valid call. Such replies are reported as protocol errors —
+     * they must never be shown to the user as a normal chat answer.
+     */
+    public static boolean looksLikeToolCall(String reply) {
+        if (reply == null) {
+            return false;
+        }
+        String text = reply.trim();
+        if (text.startsWith("```")) {
+            text = text.replaceFirst("^```(?:json)?\\s*", "");
+        }
+        return text.contains("\"tool\"") || text.contains("tool\":");
     }
 
     /**
