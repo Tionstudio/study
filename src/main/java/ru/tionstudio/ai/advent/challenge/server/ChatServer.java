@@ -129,6 +129,16 @@ public class ChatServer {
         return null;
     }
 
+    /** Context window of the default model group (null = unknown). */
+    private Integer defaultContextWindow() {
+        for (AppConfig.ModelConfig c : modelConfigs) {
+            if (clientsById.get(c.id()) == defaultClient) {
+                return c.contextWindow();
+            }
+        }
+        return null;
+    }
+
     private void handleChat(HttpExchange exchange) throws IOException {
         try {
             if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
@@ -330,6 +340,7 @@ public class ChatServer {
      */
     private AgentSession createAgentSession(String sid) {
         AgentSession session = new AgentSession(sid, defaultClient, agentTools, permissionRegistry);
+        session.setContextWindow(defaultContextWindow());
         session.setTranscriptListener(new AgentSession.TranscriptListener() {
             @Override
             public void onEntry(String kind, ObjectNode payload) {
@@ -358,6 +369,18 @@ public class ChatServer {
             }
             if (!restored.isEmpty()) {
                 session.restoreHistory(restored);
+            }
+            // Restore the cumulative dialog token counter (last usage entry)
+            List<AgentDialogStore.StoredEntry> usage =
+                    agentDialogStore.loadEntries(sid, "usage");
+            if (!usage.isEmpty()) {
+                try {
+                    JsonNode json = MAPPER.readTree(usage.get(usage.size() - 1).payload());
+                    session.restoreUsage(json.path("promptTokens").asInt(-1),
+                            json.path("completionTokens").asInt(0));
+                } catch (Exception ex) {
+                    LOG.warning("Skipping malformed usage entry in dialog " + sid);
+                }
             }
         }
         return session;
@@ -505,9 +528,10 @@ public class ChatServer {
                 case "pause" -> session.pause();
                 case "resume" -> session.resume();
                 case "abort" -> session.abort();
+                case "compress" -> session.enableCompression();
                 default -> {
                     sendJson(exchange, 400, errorJson(
-                            "Unknown action: '" + action + "'. Use pause | resume | abort."));
+                            "Unknown action: '" + action + "'. Use pause | resume | abort | compress."));
                     return;
                 }
             }
@@ -587,6 +611,16 @@ public class ChatServer {
                 response.put("sessionId", dialogId);
                 for (AgentDialogStore.StoredEntry e
                         : agentDialogStore.loadEntriesExcept(dialogId, "history")) {
+                    if ("usage".equals(e.kind())) {
+                        // Not a chat entry — returned separately (dialog counter)
+                        response.set("usage", MAPPER.readTree(e.payload()));
+                        continue;
+                    }
+                    if ("turnstats".equals(e.kind())) {
+                        // Last turn's done-payload — restores the status line
+                        response.set("lastTurn", MAPPER.readTree(e.payload()));
+                        continue;
+                    }
                     ObjectNode entry = MAPPER.createObjectNode();
                     entry.put("kind", e.kind());
                     entry.set("payload", MAPPER.readTree(e.payload()));

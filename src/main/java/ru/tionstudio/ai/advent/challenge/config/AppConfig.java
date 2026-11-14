@@ -29,9 +29,11 @@ public class AppConfig {
 
     /** One model settings group: id, model name, API key and base URL.
      * Optional prices are in USD per 1M tokens; null = cost not tracked
-     * (e.g. local models). */
+     * (e.g. local models). Optional contextWindow — the model's context
+     * size in tokens; null/0 = unknown (no fill-level warnings). */
     public record ModelConfig(String id, String model, String apiKey, String baseUrl,
-                              Double pricePrompt, Double priceCompletion) {
+                              Double pricePrompt, Double priceCompletion,
+                              Integer contextWindow) {
     }
 
     private final Properties props = new Properties();
@@ -85,15 +87,16 @@ public class AppConfig {
             String baseUrl = get("llm.models." + id + ".api.base-url", null);
             Double pricePrompt = getPrice("llm.models." + id + ".price.prompt");
             Double priceCompletion = getPrice("llm.models." + id + ".price.completion");
+            Integer contextWindow = getIntOrNull("llm.models." + id + ".context-window");
             if (model != null && baseUrl != null) {
                 list.add(new ModelConfig(id, model, apiKey, baseUrl,
-                        pricePrompt, priceCompletion));
+                        pricePrompt, priceCompletion, contextWindow));
             }
         }
         if (list.isEmpty()) {
             // Legacy single-provider configuration
             list.add(new ModelConfig("default", legacyModel(), legacyApiKey(), legacyBaseUrl(),
-                    null, null));
+                    null, null, null));
         }
         return list;
     }
@@ -106,6 +109,19 @@ public class AppConfig {
         }
         try {
             return Double.parseDouble(raw);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** Optional integer property; blank or invalid → null. */
+    private Integer getIntOrNull(String key) {
+        String raw = get(key, null);
+        if (raw == null) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(raw);
         } catch (NumberFormatException e) {
             return null;
         }

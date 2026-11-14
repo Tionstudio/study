@@ -121,6 +121,19 @@
         .msg.user { align-self: flex-end; background: #2563eb; color: #fff; }
         .msg.assistant { align-self: flex-start; background: #e5e7eb; color: #1a1a1a; }
         .msg.error { align-self: flex-start; background: #fee2e2; color: #991b1b; }
+        .compress-btn {
+            margin-left: 8px;
+            padding: 3px 12px;
+            border: 1px solid #991b1b;
+            border-radius: 8px;
+            background: #ffffff;
+            color: #991b1b;
+            font-size: 12px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .compress-btn:hover:not(:disabled) { background: #991b1b; color: #ffffff; }
+        .compress-btn:disabled { opacity: 0.65; cursor: default; }
         .msg.system-note {
             align-self: center;
             background: transparent;
@@ -220,6 +233,13 @@
         .plan-block li.done { color: #16a34a; text-decoration: line-through; }
         .plan-block li.in_progress { font-weight: 600; }
 
+        /* Planning placeholder (shown while the plan is being generated) */
+        .plan-block.placeholder { border-style: dashed; color: #64748b; background: #f8fafc; }
+        .plan-block.placeholder .dots span { display: inline-block; animation: blink 1.2s infinite; }
+        .plan-block.placeholder .dots span:nth-child(2) { animation-delay: 0.2s; }
+        .plan-block.placeholder .dots span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes blink { 0%, 100% { opacity: 0.15; } 50% { opacity: 1; } }
+
         /* Reasoning (thinking) block */
         .tool-block.reasoning { border-style: dashed; background: #fff; }
         .tool-block.reasoning pre { color: #6b7280; font-style: italic; }
@@ -259,6 +279,9 @@
                     <button id="pauseBtn" type="button" class="btn" style="display:none">Пауза</button>
                     <button id="abortBtn" type="button" class="btn danger" style="display:none">Прервать</button>
                 </div>
+            </div>
+            <div class="chat-status-row">
+                <div id="dialogStats" class="chat-status"></div>
             </div>
             <div class="input-row">
                 <textarea id="input" rows="2" placeholder="Введите запрос… (Enter — отправить, Shift+Enter — новая строка)"></textarea>
@@ -353,6 +376,42 @@
         chatStatusEl.textContent = text;
     }
 
+    // Persistent dialog-wide token counter (survives restart via the store)
+    const dialogStatsEl = document.getElementById('dialogStats');
+    function setDialogStats(usage) {
+        if (!usage || usage.totalTokens == null) {
+            return;
+        }
+        dialogStatsEl.textContent = 'токены за диалог (total): ' + usage.totalTokens
+            + ' (вх. ' + usage.promptTokens + ' / вых. ' + usage.completionTokens + ')';
+    }
+
+    // Status-line text for a finished turn (used live and after restore)
+    function formatTurnStatus(d) {
+        const stats = (d && d.stats) || {};
+        const ctx = (d && d.context) || {};
+        let status = '';
+        if (stats.totalTokens != null) {
+            // Whole turn: planning + tool-loop calls + final answer
+            status += 'запрос: ' + stats.totalTokens + ' ток. (вх. '
+                + stats.promptTokens + ' / вых. ' + stats.completionTokens + ')';
+            if (stats.replyTokens != null) {
+                status += ' · ответ: ' + stats.replyTokens + ' ток.';
+            }
+            status += ' · вызовов LLM: ' + (stats.llmCalls || 1)
+                + (stats.toolCalls ? ' · инструментов: ' + stats.toolCalls : '');
+        }
+        if (ctx.totalMessages != null) {
+            status += (status ? ' · ' : '') + 'контекст: '
+                + ctx.keptMessages + '/' + ctx.totalMessages + ' сообщ.';
+        }
+        if (d && d.durationMs != null) {
+            status += (status ? ' · ' : '') + 'время: '
+                + (d.durationMs / 1000).toFixed(1).replace('.', ',') + ' с';
+        }
+        return d && d.aborted ? (status ? status + ' · прервано' : 'Прервано') : status;
+    }
+
     function escapeHtml(s) {
         return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
             .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -363,6 +422,53 @@
         div.className = 'msg ' + role;
         div.textContent = text;
         chatEl.appendChild(div);
+        chatEl.scrollTop = chatEl.scrollHeight;
+        return div;
+    }
+
+    /**
+     * Warning/error note in the chat. When the server marks it with
+     * offerCompression (token limit hit / context window almost full),
+     * a "Сжать контекст" button is rendered next to the text.
+     */
+    function addNoteMessage(text, offerCompression) {
+        const div = addMessage(text, 'error');
+        if (!offerCompression || getCompression() === 'lastN') {
+            return div;
+        }
+        const btn = document.createElement('button');
+        btn.className = 'compress-btn';
+        btn.textContent = 'Сжать контекст';
+        btn.addEventListener('click', async () => {
+            btn.disabled = true;
+            // Switch the settings panel radio so the next request also
+            // carries compression=lastN
+            const radio = document.querySelector('input[name="compression"][value="lastN"]');
+            if (radio) {
+                radio.checked = true;
+                contextMessagesEl.disabled = false;
+            }
+            if (sessionId) {
+                try {
+                    const resp = await fetch('/api/agent/control', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ sessionId, action: 'compress' })
+                    });
+                    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                    btn.textContent = 'Сжатие включено ✓';
+                    showStatus('Сжатие контекста включено: последние '
+                        + (parseInt(contextMessagesEl.value, 10) || 20) + ' сообщений');
+                } catch (e) {
+                    btn.disabled = false;
+                    showStatus('Не удалось включить сжатие', true);
+                }
+            } else {
+                btn.textContent = 'Сжатие включено ✓';
+            }
+        });
+        div.appendChild(document.createTextNode(' '));
+        div.appendChild(btn);
         chatEl.scrollTop = chatEl.scrollHeight;
         return div;
     }
@@ -478,6 +584,25 @@
 
     // ----- Plan block -----
     let planBlock = null;
+
+    // Placeholder shown while the planning phase is running
+    let planningPlaceholder = null;
+    function showPlanningPlaceholder() {
+        removePlanningPlaceholder();
+        planningPlaceholder = document.createElement('div');
+        planningPlaceholder.className = 'plan-block placeholder';
+        planningPlaceholder.innerHTML = '<div class="plan-title">📋 Составляю план'
+            + '<span class="dots"><span>.</span><span>.</span><span>.</span></span></div>';
+        chatEl.appendChild(planningPlaceholder);
+        chatEl.scrollTop = chatEl.scrollHeight;
+    }
+    function removePlanningPlaceholder() {
+        if (planningPlaceholder) {
+            planningPlaceholder.remove();
+            planningPlaceholder = null;
+        }
+    }
+
     function renderPlan(steps) {
         if (!planBlock || !planBlock.isConnected) {
             planBlock = document.createElement('div');
@@ -678,6 +803,7 @@
         let currentToolBlocks = {};
         let gotDone = false;
         planBlock = null;
+        removePlanningPlaceholder();
         closeReasoningBlock();
 
         try {
@@ -718,8 +844,14 @@
                             reasoningPre.textContent += t;
                             chatEl.scrollTop = chatEl.scrollHeight;
                         }
+                    } else if (frame.event === 'planning') {
+                        // Planning phase started — its tokens are not streamed,
+                        // so show a placeholder until the plan itself arrives
+                        showPlanningPlaceholder();
+                        setChatStatus('Составляю план…');
                     } else if (frame.event === 'plan') {
                         const d = JSON.parse(frame.data);
+                        removePlanningPlaceholder();
                         // Only the INITIAL planning-phase event may replace a
                         // partial bubble (legacy backends streamed the raw
                         // planning JSON into it). Later plan updates — including
@@ -783,27 +915,28 @@
                         paused = false;
                         pauseBtn.textContent = 'Пауза';
                         setChatStatus('Агент думает…');
+                    } else if (frame.event === 'reply') {
+                        // The reply was truncated by the token limit and the
+                        // dangling JSON tail was cut server-side — replace the
+                        // streamed bubble with the cleaned text
+                        const d = JSON.parse(frame.data);
+                        replyText = d.text;
+                        ensureAssistantDiv().innerHTML = renderMarkdown(replyText);
+                        chatEl.scrollTop = chatEl.scrollHeight;
+                    } else if (frame.event === 'note') {
+                        const d = JSON.parse(frame.data);
+                        addNoteMessage(d.text || '', d.offerCompression);
                     } else if (frame.event === 'limit') {
                         const d = JSON.parse(frame.data);
                         addMessage('Достигнут лимит вызовов инструментов подряд ('
                             + d.max + '). Агент остановлен — уточните запрос.', 'error');
                     } else if (frame.event === 'done') {
                         gotDone = true;
+                        removePlanningPlaceholder();
                         closeReasoningBlock();
                         const d = JSON.parse(frame.data);
-                        const stats = d.stats || {};
-                        const ctx = d.context || {};
-                        let status = '';
-                        if (stats.totalTokens != null) {
-                            status += 'токены(total): ' + stats.totalTokens
-                                + ' · вызовов LLM: ' + (stats.llmCalls || 1)
-                                + (stats.toolCalls ? ' · инструментов: ' + stats.toolCalls : '');
-                        }
-                        if (ctx.totalMessages != null) {
-                            status += (status ? ' · ' : '') + 'контекст: '
-                                + ctx.keptMessages + '/' + ctx.totalMessages + ' сообщ.';
-                        }
-                        setChatStatus(d.aborted ? (status ? status + ' · прервано' : 'Прервано') : status);
+                        setChatStatus(formatTurnStatus(d));
+                        setDialogStats(d.session);
                     } else if (frame.event === 'error') {
                         throw new Error(JSON.parse(frame.data).error || 'Ошибка агента');
                     }
@@ -818,6 +951,7 @@
                 setChatStatus('Соединение закрылось до завершения — можно отправить новый запрос');
             }
         } catch (e) {
+            removePlanningPlaceholder();
             closeReasoningBlock();
             addMessage('Ошибка: ' + e.message, 'error');
             setChatStatus('');
@@ -877,7 +1011,7 @@
                 break;
             }
             case 'note':
-                addMessage(p.text || '', 'error');
+                addNoteMessage(p.text || '', p.offerCompression);
                 break;
         }
     }
@@ -891,6 +1025,10 @@
             sessionId = data.sessionId;
             for (const e of data.entries) {
                 renderHistoryEntry(e);
+            }
+            setDialogStats(data.usage);
+            if (data.lastTurn) {
+                setChatStatus(formatTurnStatus(data.lastTurn));
             }
             addMessage('История диалога восстановлена — можно продолжить.', 'system-note');
             chatEl.scrollTop = chatEl.scrollHeight;
@@ -910,6 +1048,7 @@
         sessionId = null;
         chatEl.innerHTML = '';
         setChatStatus('');
+        dialogStatsEl.textContent = '';
         pendingPermissions.clear();
         showStatus('Новый диалог');
     });

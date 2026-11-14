@@ -46,3 +46,6 @@ settings.db
 settings.db-journal
 settings.db-wal
 settings.db-shm
+
+### Log file (ring buffer, last 100 records) ###
+app.log

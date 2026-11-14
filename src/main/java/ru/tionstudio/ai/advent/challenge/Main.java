@@ -25,6 +25,13 @@ public class Main {
     public static void main(String[] args) {
         try {
             AppConfig config = AppConfig.load();
+            // Ring file log: the file always holds the last N log records
+            Path logFile = Path.of(config.get("log.file", "app.log"));
+            int logMaxRecords = config.getInt("log.max-records", 100);
+            java.util.logging.Logger.getLogger("")
+                    .addHandler(new RingFileLogHandler(logFile, logMaxRecords));
+            LOG.info("File log enabled: " + logFile.toAbsolutePath()
+                    + " (last " + logMaxRecords + " records)");
             java.util.List<AppConfig.ModelConfig> modelConfigs = config.modelConfigs();
             AppConfig.ModelConfig defaultGroup = config.defaultModelConfig();
             AppConfig.ModelConfig analysisGroup = config.analysisModelConfig();

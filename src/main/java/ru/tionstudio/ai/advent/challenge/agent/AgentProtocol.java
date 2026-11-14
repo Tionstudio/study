@@ -308,6 +308,56 @@ public class AgentProtocol {
     }
 
     /**
+     * When the model's reply was truncated by the token limit
+     * (finish_reason=length), the tail often contains an incomplete JSON
+     * tool call or an unclosed markdown fence — showing it raw looks broken.
+     * Removes that dangling tail, keeping the prose part.
+     */
+    static String stripTruncatedTail(String text) {
+        String result = text;
+        // Unclosed ``` fence at the tail
+        int fences = 0;
+        for (int i = result.indexOf("```"); i >= 0; i = result.indexOf("```", i + 3)) {
+            fences++;
+        }
+        if (fences % 2 == 1) {
+            result = result.substring(0, result.lastIndexOf("```"));
+        }
+        // Unbalanced '{' tail (incomplete JSON object)
+        int depth = 0;
+        int unclosedStart = -1;
+        boolean inString = false, escaped = false;
+        for (int i = 0; i < result.length(); i++) {
+            char c = result.charAt(i);
+            if (escaped) {
+                escaped = false;
+                continue;
+            }
+            if (c == '\\' && inString) {
+                escaped = true;
+            } else if (c == '"') {
+                inString = !inString;
+            } else if (!inString) {
+                if (c == '{') {
+                    if (depth == 0) {
+                        unclosedStart = i;
+                    }
+                    depth++;
+                } else if (c == '}') {
+                    depth--;
+                    if (depth == 0) {
+                        unclosedStart = -1;
+                    }
+                }
+            }
+        }
+        if (depth > 0 && unclosedStart >= 0) {
+            result = result.substring(0, unclosedStart);
+        }
+        return result.stripTrailing();
+    }
+
+    /**
      * Validates a tool call before execution. Returns {@code null} when the
      * call is valid, otherwise a human-readable error (fed back to the model
      * as the tool result).

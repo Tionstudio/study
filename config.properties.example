@@ -20,6 +20,9 @@ llm.models.cloud.price.completion=0.60
 llm.models.local.model=local-model
 llm.models.local.api.key=not-required
 llm.models.local.api.base-url=http://localhost:1234/v1
+# Model context window in tokens (as loaded on your local server) — used
+# for context-fill warnings on the agent page. Optional.
+llm.models.local.context-window=4096
 
 # Google Gemini (OpenAI-compatible endpoint of the Gemini API)
 llm.models.gemini.model=gemini-3.8-flash
@@ -35,3 +38,7 @@ llm.analysis.model=cloud
 
 # Local web server port
 server.port=8080
+
+# File log: path and ring-buffer size (the file keeps only the last N records)
+log.file=app.log
+log.max-records=100
