@@ -115,6 +115,7 @@
             min-height: 0;
             overflow-y: auto;
             padding: 16px;
+            padding-right: 46px; /* правое поле под маркеры ветвления */
             display: flex;
             flex-direction: column;
             gap: 10px;
@@ -127,7 +128,32 @@
             word-wrap: break-word;
             line-height: 1.45;
             font-size: 14px;
+            position: relative;
         }
+        .msg .cp-marker {
+            position: absolute;
+            right: -34px; /* правое поле чата, напротив user-пузыря */
+            top: 50%;
+            transform: translateY(-50%);
+            width: 24px;
+            height: 24px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            padding: 0;
+            opacity: 0;
+            transition: opacity .12s ease;
+        }
+        .msg.user:hover .cp-marker, .msg .cp-marker:hover { opacity: 1; }
+        .msg .cp-marker svg {
+            width: 16px; height: 16px;
+            stroke: #9ca3af; fill: none;
+            stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;
+        }
+        .msg .cp-marker:hover svg { stroke: #2563eb; }
         .msg.user { align-self: flex-end; background: #2563eb; color: #fff; }
         .msg.assistant { align-self: flex-start; background: #e5e7eb; color: #1a1a1a; }
         .msg.error { align-self: flex-start; background: #fee2e2; color: #991b1b; }
@@ -320,6 +346,9 @@
         .script-results td.min { background: #dcfce7; }
         .script-results td.max { background: #fee2e2; }
         .script-results .btn { margin-top: 10px; }
+        /* Results live OUTSIDE #chat: tab switches and per-dialog chat clears
+           must not wipe the comparison table */
+        #scriptResults { margin-top: 8px; max-height: 40vh; overflow-y: auto; }
         .chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-height: 19px; }
         .chip {
             background: #f3f4f6;
@@ -344,6 +373,24 @@
             font-family: inherit;
         }
         #send { padding: 10px 18px; font-size: 14px; }
+        .dialog-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 6px; }
+        .dialog-tab {
+            display: flex; align-items: center; gap: 6px;
+            padding: 4px 10px; border: 1px solid #d1d5db; border-radius: 8px;
+            background: #f9fafb; font-size: 12px; cursor: pointer; max-width: 220px;
+        }
+        .dialog-tab.active { background: #2563eb; color: #fff; border-color: #2563eb; }
+        .dialog-tab.disabled { opacity: 0.5; cursor: default; }
+        .dialog-tab .tab-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .dialog-tab .tab-close {
+            border: none; background: transparent; cursor: pointer;
+            font-size: 11px; color: inherit; padding: 0 2px; line-height: 1;
+        }
+        .dialog-tab .tab-rename {
+            font-size: 12px; width: 130px; padding: 1px 4px;
+            border: none; border-radius: 4px; color: inherit;
+            background: rgba(255,255,255,.25); outline: none;
+        }
     </style>
 </head>
 <body>
@@ -356,6 +403,7 @@
 
     <div class="layout">
         <div class="chat-column">
+            <div id="dialogTabs" class="dialog-tabs" style="display:none"></div>
             <div class="chat-wrap">
                 <div id="chat"></div>
                 <div id="typingBar" class="msg typing" style="display:none">
@@ -363,6 +411,7 @@
                     <span class="typing-text"></span>
                 </div>
             </div>
+            <div id="scriptResults" style="display:none"></div>
             <div class="chat-status-row">
                 <div class="chat-actions">
                     <button id="pauseBtn" type="button" class="btn" style="display:none">Пауза</button>
@@ -399,6 +448,30 @@
                         <input type="number" id="contextMessages" min="1" max="500" value="20" disabled>
                     </div>
                     <label class="option">
+                        <input type="radio" name="compression" value="sliding">
+                        <span>Sliding Window (последние N записей)</span>
+                    </label>
+                    <div class="number-row">
+                        <span>N:</span>
+                        <input type="number" id="slidingMessages" min="1" max="500" value="30" disabled>
+                    </div>
+                    <label class="option">
+                        <input type="radio" name="compression" value="sticky">
+                        <span>Sticky Facts (факты + последние N)</span>
+                    </label>
+                    <div class="number-row">
+                        <span>N:</span>
+                        <input type="number" id="stickyKeep" min="1" max="500" value="20" disabled>
+                    </div>
+                    <div class="number-row">
+                        <span>Макс. фактов:</span>
+                        <input type="number" id="factsMax" min="5" max="500" value="50" disabled>
+                    </div>
+                    <div class="number-row">
+                        <span>Консолидация, каждые M сообщ.:</span>
+                        <input type="number" id="factsConsolidate" min="0" max="200" value="0" disabled>
+                    </div>
+                    <label class="option">
                         <input type="radio" name="compression" value="summary">
                         <span>Summary + последние N</span>
                     </label>
@@ -410,7 +483,7 @@
                         <span>Обновлять каждые:</span>
                         <input type="number" id="summaryEvery" min="1" max="200" value="10" disabled>
                     </div>
-                    <span class="hint">Системный промпт с инструментами всегда остаётся в контексте и не сжимается. Считаются только реплики пользователя и ассистента. В режиме summary старая часть диалога заменяется кратким содержанием, которое обновляется через каждые M сообщений.</span>
+                    <span class="hint">Системный промпт с инструментами всегда остаётся в контексте и не сжимается. Режим «Последние N сообщений» считает только реплики пользователя и ассистента (записи инструментов остаются при своём ходе). Sliding Window — жёсткое окно: хранятся последние N записей истории любого типа (включая вызовы инструментов), всё старое отбрасывается; окно может начаться с середины хода. Sticky Facts — агент извлекает из диалога факты ключ-значение (отдельным вызовом LLM без контекста), хранит их в БД и подмешивает в контекст вместе с последними N сообщениями; консолидация (M &gt; 0) периодически сливает дубли фактов. В режиме summary старая часть диалога заменяется кратким содержанием, которое обновляется через каждые M сообщений.</span>
                 </fieldset>
 
                 <fieldset>
@@ -418,6 +491,10 @@
                     <details>
                         <summary>Текущее summary</summary>
                         <div id="summaryText" class="summary-text"></div>
+                    </details>
+                    <details>
+                        <summary>Известные факты (<span id="factsCount">0</span>)</summary>
+                        <div id="factsList" class="summary-text"></div>
                     </details>
                 </fieldset>
 
@@ -442,6 +519,7 @@
                 <fieldset>
                     <legend>Диалог</legend>
                     <button id="newChat" type="button" class="btn">Новый диалог</button>
+                    <div class="hint" style="margin-top:6px">Наведите на своё сообщение — справа на полях появится иконка ветвления: она создаёт ветку диалога с этого места (вкладка над чатом). Вкладка переименовывается двойным кликом.</div>
                     <div id="settingsStatus" class="settings-status" style="margin-top:6px"></div>
                 </fieldset>
 
@@ -452,9 +530,10 @@
                     <div id="scriptProgress" class="script-progress"></div>
                     <div class="hint">
                         JSON: список диалогов, у каждого — название, свои настройки
-                        и сообщения пользователя. Диалоги выполняются по очереди
-                        (каждый — в новой сессии, чат не очищается), затем строится
-                        сравнительная таблица.
+                        и сообщения пользователя. Диалоги выполняются по очереди,
+                        каждый получает вкладку над чатом (все остаются доступны
+                        после прогона). Сравнительная таблица показывается на
+                        вкладке диалога, из которого запущен скрипт.
                     </div>
                 </fieldset>
             </div>
@@ -464,6 +543,7 @@
 
 <script>
     const chatEl = document.getElementById('chat');
+    const scriptResultsEl = document.getElementById('scriptResults');
     // status text lives in the typing bubble (see setChatStatus)
     const settingsStatus = document.getElementById('settingsStatus');
     const inputEl = document.getElementById('input');
@@ -479,10 +559,16 @@
     let paused = false;
     let scriptActive = false;   // a dialog script is running
     let toolsOverride = null;   // script per-dialog "tools" flag (null = on)
+    let scriptDialogName = null;      // tab title for the running script dialog
+    let scriptResultsDialogId = null; // the dialog the script was launched from
 
     // Compression radios enable/disable the related number inputs
     const summaryKeepEl = document.getElementById('summaryKeep');
     const summaryEveryEl = document.getElementById('summaryEvery');
+    const slidingMessagesEl = document.getElementById('slidingMessages');
+    const stickyKeepEl = document.getElementById('stickyKeep');
+    const factsMaxEl = document.getElementById('factsMax');
+    const factsConsolidateEl = document.getElementById('factsConsolidate');
 
     // Compression settings persist across page reloads (localStorage)
     const COMPRESSION_KEY = 'agentCompressionSettings';
@@ -491,6 +577,10 @@
         contextMessagesEl.disabled = mode !== 'lastN';
         summaryKeepEl.disabled = mode !== 'summary';
         summaryEveryEl.disabled = mode !== 'summary';
+        slidingMessagesEl.disabled = mode !== 'sliding';
+        stickyKeepEl.disabled = mode !== 'sticky';
+        factsMaxEl.disabled = mode !== 'sticky';
+        factsConsolidateEl.disabled = mode !== 'sticky';
     }
     function saveCompressionSettings() {
         try {
@@ -498,7 +588,11 @@
                 mode: getCompression(),
                 contextMessages: contextMessagesEl.value,
                 summaryKeep: summaryKeepEl.value,
-                summaryEvery: summaryEveryEl.value
+                summaryEvery: summaryEveryEl.value,
+                slidingMessages: slidingMessagesEl.value,
+                stickyKeep: stickyKeepEl.value,
+                factsMax: factsMaxEl.value,
+                factsConsolidate: factsConsolidateEl.value
             }));
         } catch (e) { /* storage unavailable — settings just won't persist */ }
     }
@@ -514,6 +608,10 @@
         if (s.contextMessages) contextMessagesEl.value = s.contextMessages;
         if (s.summaryKeep) summaryKeepEl.value = s.summaryKeep;
         if (s.summaryEvery) summaryEveryEl.value = s.summaryEvery;
+        if (s.slidingMessages) slidingMessagesEl.value = s.slidingMessages;
+        if (s.stickyKeep) stickyKeepEl.value = s.stickyKeep;
+        if (s.factsMax) factsMaxEl.value = s.factsMax;
+        if (s.factsConsolidate != null) factsConsolidateEl.value = s.factsConsolidate;
     }
     document.querySelectorAll('input[name="compression"]').forEach(r => {
         r.addEventListener('change', () => {
@@ -521,7 +619,8 @@
             saveCompressionSettings();
         });
     });
-    [contextMessagesEl, summaryKeepEl, summaryEveryEl].forEach(el => {
+    [contextMessagesEl, summaryKeepEl, summaryEveryEl, slidingMessagesEl,
+        stickyKeepEl, factsMaxEl, factsConsolidateEl].forEach(el => {
         el.addEventListener('change', saveCompressionSettings);
     });
     loadCompressionSettings();
@@ -659,6 +758,20 @@
             : 'пока пусто — summary появится в режиме «Summary + последние N»';
     }
     setSummaryPanel('', 0);
+
+    // Facts panel: key-value memory ("sticky" compression mode)
+    const FACT_ICONS = { goal: '🎯', constraint: '⛔', preference: '⭐', decision: '🤝', fact: '📌' };
+    const factsListEl = document.getElementById('factsList');
+    const factsCountEl = document.getElementById('factsCount');
+    function setFactsPanel(facts) {
+        facts = Array.isArray(facts) ? facts : [];
+        factsCountEl.textContent = facts.length;
+        factsListEl.textContent = facts.length
+            ? facts.map(f => (FACT_ICONS[f.category] || '📌') + ' [' + f.category + '] '
+                + f.key + ': ' + f.value).join('\n')
+            : 'пока пусто — факты появятся в режиме «Sticky Facts»';
+    }
+    setFactsPanel([]);
 
     function escapeHtml(s) {
         return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -1019,6 +1132,7 @@
             paused = false;
             pauseBtn.textContent = 'Пауза';
         }
+        renderTabs(); // tab switching is locked while a turn/script runs
     }
 
     pauseBtn.addEventListener('click', () => {
@@ -1053,7 +1167,7 @@
      * failed. Used by the manual input AND by the dialog-script runner.
      */
     async function runTurn(text) {
-        addMessage(text, 'user');
+        attachCheckpointMarker(addMessage(text, 'user'));
         setBusy(true);
         setChatStatus('Агент думает…');
 
@@ -1065,6 +1179,10 @@
             planning: planningEl.checked,
             summaryKeep: parseInt(summaryKeepEl.value, 10) || 5,
             summaryEvery: parseInt(summaryEveryEl.value, 10) || 10,
+            slidingMessages: parseInt(slidingMessagesEl.value, 10) || 30,
+            stickyKeep: parseInt(stickyKeepEl.value, 10) || 20,
+            factsMax: parseInt(factsMaxEl.value, 10) || 50,
+            factsConsolidate: parseInt(factsConsolidateEl.value, 10) || 0,
             tools: toolsOverride === null ? true : toolsOverride
         };
         if (sessionId) payload.sessionId = sessionId;
@@ -1110,7 +1228,15 @@
                     buffer = buffer.slice(idx + 2);
                     if (!frame) continue;
                     if (frame.event === 'session') {
-                        sessionId = JSON.parse(frame.data).id;
+                        const sd = JSON.parse(frame.data);
+                        sessionId = sd.id;
+                        activeTabId = sd.id;
+                        lastDialogTitle = sd.title || '';
+                        // Script dialogs get tabs too — named after the script
+                        // dialog, so every run stays viewable afterwards
+                        upsertTab(sd.id,
+                            scriptActive ? (scriptDialogName || sd.title) : sd.title);
+                        renderTabs();
                     } else if (frame.event === 'token') {
                         closeReasoningBlock();
                         replyText += JSON.parse(frame.data).text;
@@ -1224,6 +1350,10 @@
                         // The summary was regenerated — refresh the memory panel
                         const d = JSON.parse(frame.data);
                         setSummaryPanel(d.text || '', d.coveredCounted || 0);
+                    } else if (frame.event === 'facts') {
+                        // Key-value memory updated (sticky mode) — refresh the panel
+                        const d = JSON.parse(frame.data);
+                        setFactsPanel(d.facts);
                     } else if (frame.event === 'limit') {
                         const d = JSON.parse(frame.data);
                         addMessage('Достигнут лимит вызовов инструментов подряд ('
@@ -1285,7 +1415,7 @@
         switch (e.kind) {
             case 'user':
                 planBlock = null; // each turn gets its own plan block
-                addMessage(p.text || '', 'user');
+                attachCheckpointMarker(addMessage(p.text || '', 'user'));
                 break;
             case 'assistant':
             case 'prose': {
@@ -1322,13 +1452,20 @@
         }
     }
 
-    async function restoreDialog() {
+    async function restoreDialog(dialogIdOverride) {
         try {
-            const resp = await fetch('/api/agent/history');
+            const target = dialogIdOverride || urlDialog;
+            const resp = await fetch('/api/agent/history'
+                + (target ? '?dialog=' + encodeURIComponent(target) : ''));
             if (!resp.ok) return;
             const data = await resp.json();
-            if (!data.sessionId || !data.entries || !data.entries.length) return;
+            if (!data.sessionId) return;
             sessionId = data.sessionId;
+            activeTabId = sessionId;
+            lastDialogTitle = data.title || '';
+            upsertTab(sessionId, data.title);
+            renderTabs();
+            if (!data.entries || !data.entries.length) return;
             for (const e of data.entries) {
                 renderHistoryEntry(e);
             }
@@ -1336,8 +1473,16 @@
             if (data.summary) {
                 setSummaryPanel(data.summary.text || '', data.summary.coveredCounted || 0);
             }
+            if (data.facts) {
+                setFactsPanel(data.facts);
+            }
             if (data.lastTurn) {
                 renderTurnChips(data.lastTurn);
+            }
+            if (data.settings) {
+                // A dialog forked from a checkpoint carries the settings
+                // snapshot of the source dialog
+                applyDialogSettings(data.settings);
             }
             addMessage('История диалога восстановлена — можно продолжить.', 'system-note');
             chatEl.scrollTop = chatEl.scrollHeight;
@@ -1346,11 +1491,227 @@
         }
     }
 
+    // ----- Checkpoints → branch tabs -----
+    // The fork icon in the right margin of a user bubble saves a checkpoint
+    // at the end of that question-answer pair and immediately forks it into
+    // a new dialog, which appears as a tab above the chat. Checkpoint records
+    // stay server-side (no list UI); branches live their own independent life.
+    const urlDialog = new URLSearchParams(location.search).get('dialog');
+    let lastDialogTitle = '';
+
+    function currentSettingsSnapshot() {
+        return {
+            compression: getCompression(),
+            contextMessages: parseInt(contextMessagesEl.value, 10) || 20,
+            summaryKeep: parseInt(summaryKeepEl.value, 10) || 5,
+            summaryEvery: parseInt(summaryEveryEl.value, 10) || 10,
+            slidingMessages: parseInt(slidingMessagesEl.value, 10) || 30,
+            stickyKeep: parseInt(stickyKeepEl.value, 10) || 20,
+            factsMax: parseInt(factsMaxEl.value, 10) || 50,
+            factsConsolidate: parseInt(factsConsolidateEl.value, 10) || 0,
+            maxToolCalls: parseInt(maxToolCallsEl.value, 10) || 5,
+            planning: planningEl.checked
+        };
+    }
+
+    /**
+     * Saves a checkpoint at the end of pair {@code turn} and forks it right
+     * away: the branch dialog opens as a new tab and becomes active. The
+     * branch is auto-named ("Ветка · после пары N") — rename the tab with a
+     * double click on it.
+     */
+    async function saveCheckpoint(turn) {
+        if (!sessionId || busy || scriptActive) return;
+        try {
+            const body = {
+                dialogId: sessionId,
+                label: 'Ветка · после пары ' + turn,
+                settings: currentSettingsSnapshot(),
+                turn: turn
+            };
+            const resp = await fetch('/api/agent/checkpoint', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            const cp = await resp.json();
+            if (!resp.ok) throw new Error(cp.error || ('HTTP ' + resp.status));
+            const forkResp = await fetch('/api/agent/checkpoint/fork', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ checkpointId: cp.id })
+            });
+            const fork = await forkResp.json();
+            if (!forkResp.ok) throw new Error(fork.error || ('HTTP ' + forkResp.status));
+            // The current dialog gets a tab too, so both are visible at once
+            upsertTab(sessionId, lastDialogTitle);
+            upsertTab(fork.dialogId, fork.title);
+            renderTabs();
+            showStatus('Ветка создана: ' + fork.title);
+            switchDialog(fork.dialogId);
+        } catch (e) {
+            showStatus('Ошибка создания ветки: ' + e.message, true);
+        }
+    }
+
+    // Turns are numbered by user bubbles, exactly as the server counts
+    // transcript entries of kind "user" — the fork icon in the right margin
+    // of pair N saves a checkpoint with turn=N (boundary right after that
+    // pair's entries) and immediately opens the branch as a tab
+    let turnCounter = 0;
+    function attachCheckpointMarker(userDiv) {
+        turnCounter++;
+        const turn = turnCounter;
+        const btn = document.createElement('button');
+        btn.className = 'cp-marker';
+        btn.title = 'Создать ветку с этого места (после пары ' + turn + ')';
+        btn.innerHTML = '<svg viewBox="0 0 24 24">'
+            + '<circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/>'
+            + '<circle cx="18" cy="9" r="2.2"/>'
+            + '<path d="M6 7v10M6 9c0 4 6 2 10 0"/></svg>';
+        btn.addEventListener('click', () => saveCheckpoint(turn));
+        userDiv.appendChild(btn);
+    }
+
+    // ----- Dialog tabs -----
+    // The source dialog and its checkpoint branches live as tabs above the
+    // chat. Tabs are switches: only one dialog is shown at a time, switching
+    // reloads the chat from the server (dialogs are independent server-side).
+    // Switching/closing is locked while a turn or a script is running.
+    const tabsEl = document.getElementById('dialogTabs');
+    const TABS_KEY = 'agentDialogTabs';
+    let dialogTabs = [];
+    let activeTabId = null;
+    try {
+        dialogTabs = JSON.parse(localStorage.getItem(TABS_KEY) || '[]');
+    } catch (e) { dialogTabs = []; }
+
+    function saveTabs() {
+        try {
+            localStorage.setItem(TABS_KEY, JSON.stringify(dialogTabs));
+        } catch (e) { /* storage unavailable — tabs live until reload */ }
+    }
+
+    function upsertTab(id, title) {
+        let t = dialogTabs.find(t => t.id === id);
+        if (!t) {
+            t = { id, title: title || '' };
+            dialogTabs.push(t);
+        } else if (title) {
+            t.title = title;
+        }
+        saveTabs();
+    }
+
+    function renderTabs() {
+        tabsEl.innerHTML = '';
+        const locked = busy || scriptActive;
+        dialogTabs.forEach(t => {
+            const el = document.createElement('div');
+            el.className = 'dialog-tab'
+                + (t.id === activeTabId ? ' active' : '')
+                + (locked ? ' disabled' : '');
+            const span = document.createElement('span');
+            span.className = 'tab-title';
+            span.textContent = t.title || 'Диалог';
+            span.title = span.textContent + ' — двойной клик: переименовать';
+            span.addEventListener('dblclick', (ev) => {
+                ev.stopPropagation();
+                if (busy || scriptActive) return;
+                const input = document.createElement('input');
+                input.className = 'tab-rename';
+                input.value = t.title || '';
+                input.placeholder = 'Диалог';
+                el.replaceChild(input, span);
+                input.focus();
+                input.select();
+                const commit = () => {
+                    t.title = input.value.trim();
+                    saveTabs();
+                    renderTabs();
+                };
+                input.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') commit();
+                    if (e.key === 'Escape') renderTabs();
+                });
+                input.addEventListener('blur', commit);
+                input.addEventListener('click', (e) => e.stopPropagation());
+            });
+            el.appendChild(span);
+            const close = document.createElement('button');
+            close.className = 'tab-close';
+            close.textContent = '✕';
+            close.title = 'Закрыть вкладку (сам диалог остаётся в хранилище)';
+            close.addEventListener('click', (ev) => {
+                ev.stopPropagation();
+                closeTab(t.id);
+            });
+            el.appendChild(close);
+            el.addEventListener('click', () => switchDialog(t.id));
+            tabsEl.appendChild(el);
+        });
+        tabsEl.style.display = dialogTabs.length > 1 ? '' : 'none';
+        updateScriptResultsVisibility();
+    }
+
+    // The script comparison table belongs to the dialog the script was
+    // launched from — visible only while its tab is active
+    function updateScriptResultsVisibility() {
+        if (!scriptResultsEl.innerHTML) return;
+        const visible = !scriptResultsDialogId
+            || activeTabId === scriptResultsDialogId;
+        scriptResultsEl.style.display = visible ? '' : 'none';
+    }
+
+    async function switchDialog(id) {
+        if (busy || scriptActive) {
+            showStatus('Дождитесь завершения текущего хода', true);
+            return;
+        }
+        if (id === activeTabId) return;
+        activeTabId = id;
+        sessionId = null;
+        clearChatUi();
+        renderTabs();
+        await restoreDialog(id);
+    }
+
+    function closeTab(id) {
+        if (busy || scriptActive) {
+            showStatus('Дождитесь завершения текущего хода', true);
+            return;
+        }
+        const idx = dialogTabs.findIndex(t => t.id === id);
+        if (idx < 0) return;
+        dialogTabs.splice(idx, 1);
+        saveTabs();
+        if (activeTabId === id) {
+            const next = dialogTabs[Math.min(idx, dialogTabs.length - 1)];
+            if (next) {
+                activeTabId = null;
+                renderTabs();
+                switchDialog(next.id);
+                return;
+            }
+            activeTabId = null;
+            if (sessionId) {
+                fetch('/api/agent/session?id=' + encodeURIComponent(sessionId),
+                    { method: 'DELETE' }).catch(() => {});
+                sessionId = null;
+            }
+            clearChatUi();
+        }
+        renderTabs();
+    }
+    renderTabs();
+
     // ----- Dialog script -----
     // A JSON file with named dialogs (own settings + user messages each).
-    // Dialogs run one by one — each in a FRESH session (stats restart),
-    // the chat itself is never cleared. Afterwards a comparison table is
-    // appended, with an optional analysis by the analysis model.
+    // Dialogs run one by one — each in a FRESH session with the chat cleared,
+    // and each gets a tab above the chat (named after the script dialog), so
+    // all of them stay viewable after the run. The comparison table is bound
+    // to the dialog the script was launched from: after the run the page
+    // switches back to its tab, and the table is hidden on other tabs.
     const scriptFileEl = document.getElementById('scriptFile');
     const scriptRunBtn = document.getElementById('scriptRun');
     const scriptProgressEl = document.getElementById('scriptProgress');
@@ -1399,6 +1760,10 @@
         planningEl.checked = !!s.planning;
         if (s.summaryKeep) summaryKeepEl.value = s.summaryKeep;
         if (s.summaryEvery) summaryEveryEl.value = s.summaryEvery;
+        if (s.slidingMessages) slidingMessagesEl.value = s.slidingMessages;
+        if (s.stickyKeep) stickyKeepEl.value = s.stickyKeep;
+        if (s.factsMax) factsMaxEl.value = s.factsMax;
+        if (typeof s.factsConsolidate === 'number') factsConsolidateEl.value = s.factsConsolidate;
         toolsOverride = (typeof s.tools === 'boolean') ? s.tools : null;
         updateCompressionInputs();
     }
@@ -1412,14 +1777,22 @@
         scriptActive = true;
         scriptRunBtn.disabled = true;
         setBusy(false); // re-locks inputs via scriptActive
+        scriptResultsEl.innerHTML = ''; // previous run's table is replaced
+        scriptResultsEl.style.display = 'none';
+        // The comparison table belongs to the dialog the script was launched
+        // from — after the run the page returns to its tab and shows it there
+        scriptResultsDialogId = sessionId;
         const results = [];
         let aborted = false;
         try {
             for (let di = 0; di < script.dialogs.length && !aborted; di++) {
                 const dlg = script.dialogs[di];
                 const name = dlg.name || ('Диалог ' + (di + 1));
-                // Fresh session per dialog: per-dialog stats start from zero,
-                // the chat content itself is kept
+                scriptDialogName = name; // tab title for this script dialog
+                // Fresh session per dialog: per-dialog stats start from zero
+                // and the chat is cleared, so each dialog is seen separately;
+                // every dialog gets a tab (see the "session" event), so all
+                // of them stay viewable after the run
                 if (sessionId) {
                     try {
                         await fetch('/api/agent/session?id='
@@ -1427,6 +1800,7 @@
                     } catch (e) { /* best effort */ }
                     sessionId = null;
                 }
+                clearChatUi();
                 applyDialogSettings(dlg.settings);
                 addMessage('═══ Скрипт: диалог «' + name + '» ('
                     + dlg.messages.length + ' сообщений) ═══', 'system-note');
@@ -1461,6 +1835,7 @@
             }
         } finally {
             scriptActive = false;
+            scriptDialogName = null;
             toolsOverride = null;
             scriptRunBtn.disabled = false;
             scriptProgressEl.textContent = aborted
@@ -1469,6 +1844,11 @@
         }
         if (results.length) {
             renderScriptResults(results);
+            // Back to the dialog the script was launched from — the
+            // comparison table is visible only on its tab
+            if (scriptResultsDialogId) {
+                switchDialog(scriptResultsDialogId);
+            }
         }
     }
 
@@ -1535,8 +1915,12 @@
         });
         btn.addEventListener('click', () => analyzeScriptResults(results, btn, mdBtn));
         wrap.append(btn, csvBtn, mdBtn);
-        chatEl.appendChild(wrap);
-        chatEl.scrollTop = chatEl.scrollHeight;
+        // The results are cross-dialog: they live in their own container
+        // under the chat frame, so tab switches / chat clears don't wipe them
+        scriptResultsEl.innerHTML = '';
+        scriptResultsEl.appendChild(wrap);
+        scriptResultsEl.style.display = '';
+        scriptResultsEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     }
 
     // ----- File export helpers -----
@@ -1597,12 +1981,14 @@
     async function analyzeScriptResults(results, btn, mdBtn) {
         btn.disabled = true;
         const prompt = buildScriptAnalysisPrompt(results);
-        const progress = addMessage('Анализ результатов скрипта (модель для анализа)…',
-            'system-note');
+        const progress = document.createElement('div');
+        progress.className = 'msg system-note';
+        progress.textContent = 'Анализ результатов скрипта (модель для анализа)…';
+        scriptResultsEl.appendChild(progress);
         const answerDiv = document.createElement('div');
         answerDiv.className = 'msg assistant md';
-        chatEl.appendChild(answerDiv);
-        chatEl.scrollTop = chatEl.scrollHeight;
+        scriptResultsEl.appendChild(answerDiv);
+        scriptResultsEl.scrollTop = scriptResultsEl.scrollHeight;
         let replyText = '';
         try {
             const resp = await fetch('/api/chat', {
@@ -1630,7 +2016,7 @@
                     if (frame.event === 'token') {
                         replyText += JSON.parse(frame.data).text;
                         answerDiv.innerHTML = renderMarkdown(replyText);
-                        chatEl.scrollTop = chatEl.scrollHeight;
+                        scriptResultsEl.scrollTop = scriptResultsEl.scrollHeight;
                     } else if (frame.event === 'done') {
                         const d = JSON.parse(frame.data);
                         if (!replyText && d.reply) replyText = d.reply;
@@ -1660,6 +2046,17 @@
     }
 
     // ----- New dialog -----
+    function clearChatUi() {
+        chatEl.innerHTML = '';
+        turnCounter = 0;
+        setChatStatus('');
+        processChipsEl.innerHTML = '';
+        tokenChipsEl.innerHTML = '';
+        setSummaryPanel('', 0);
+        setFactsPanel([]);
+        pendingPermissions.clear();
+    }
+
     document.getElementById('newChat').addEventListener('click', async () => {
         if (sessionId) {
             try {
@@ -1667,13 +2064,16 @@
                     { method: 'DELETE' });
             } catch (e) { /* best effort */ }
         }
+        // The active tab turns into a fresh dialog; its old dialog id leaves
+        // the tab list (the stored dialog itself is kept)
+        if (activeTabId) {
+            dialogTabs = dialogTabs.filter(t => t.id !== activeTabId);
+            activeTabId = null;
+            saveTabs();
+            renderTabs();
+        }
         sessionId = null;
-        chatEl.innerHTML = '';
-        setChatStatus('');
-        processChipsEl.innerHTML = '';
-        tokenChipsEl.innerHTML = '';
-        setSummaryPanel('', 0);
-        pendingPermissions.clear();
+        clearChatUi();
         showStatus('Новый диалог');
     });
 

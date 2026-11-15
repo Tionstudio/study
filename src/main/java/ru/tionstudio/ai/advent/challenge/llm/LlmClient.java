@@ -92,6 +92,11 @@ public class LlmClient {
         this.model = model;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(15))
+                // Honor the OS proxy settings (VPN clients like Clash register
+                // a system proxy): java.net.http does NOT use them by default.
+                // With no system proxy configured the default selector is
+                // direct, so this is a no-op.
+                .proxy(java.net.ProxySelector.getDefault())
                 .build();
     }
 

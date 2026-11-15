@@ -10,6 +10,7 @@ import com.sun.net.httpserver.HttpServer;
 import ru.tionstudio.ai.advent.challenge.agent.AgentSession;
 import ru.tionstudio.ai.advent.challenge.agent.AgentTools;
 import ru.tionstudio.ai.advent.challenge.agent.AgentDialogStore;
+import ru.tionstudio.ai.advent.challenge.agent.AgentProtocol;
 import ru.tionstudio.ai.advent.challenge.config.AppConfig;
 import ru.tionstudio.ai.advent.challenge.conversation.ConversationManager;
 import ru.tionstudio.ai.advent.challenge.conversation.ConversationStore;
@@ -110,6 +111,8 @@ public class ChatServer {
         server.createContext("/api/agent/control", this::handleAgentControl);
         server.createContext("/api/agent/session", this::handleAgentSession);
         server.createContext("/api/agent/history", this::handleAgentHistory);
+        server.createContext("/api/agent/checkpoint", this::handleAgentCheckpoint);
+        server.createContext("/api/agent/checkpoint/fork", this::handleAgentCheckpointFork);
         server.createContext("/api/presets", this::handlePresets);
         server.createContext("/api/conversations", this::handleConversations);
         server.createContext("/api/models", this::handleModels);
@@ -339,7 +342,8 @@ public class ChatServer {
      * way the session is bound to the persistent transcript.
      */
     private AgentSession createAgentSession(String sid) {
-        AgentSession session = new AgentSession(sid, defaultClient, agentTools, permissionRegistry);
+        AgentSession session = new AgentSession(sid, defaultClient, agentTools,
+                agentDialogStore, permissionRegistry);
         session.setContextWindow(defaultContextWindow());
         session.setTranscriptListener(new AgentSession.TranscriptListener() {
             @Override
@@ -396,13 +400,18 @@ public class ChatServer {
                 }
             }
         }
+        // Restore the key-value fact memory ("sticky" mode) — it lives in its
+        // own table, so it is available even for a dialog without entries yet
+        session.restoreFacts(agentDialogStore.listFacts(sid));
         return session;
     }
 
     /**
      * {@code POST /api/agent/chat} — runs one turn of the tool-using agent.
      * Body: {@code {"message": "...", "sessionId"?: "...", "compression"?:
-     * "none"|"lastN", "contextMessages"?: N, "maxToolCalls"?: N,
+     * "none"|"lastN"|"summary"|"sliding"|"sticky", "contextMessages"?: N,
+     * "slidingMessages"?: N, "stickyKeep"?: N, "factsMax"?: N,
+     * "factsConsolidate"?: N, "maxToolCalls"?: N,
      * "planning"?: bool, "tools"?: bool}}.
      * SSE events: session, token, tool_call, tool_result, permission_request,
      * permission_resolved, paused, resumed, limit, done, error.
@@ -444,6 +453,10 @@ public class ChatServer {
                     json.path("planning").asBoolean(true),
                     json.path("summaryKeep").asInt(0),
                     json.path("summaryEvery").asInt(0),
+                    json.path("slidingMessages").asInt(0),
+                    json.path("stickyKeep").asInt(0),
+                    json.path("factsMax").asInt(0),
+                    json.path("factsConsolidate").asInt(0),
                     json.path("tools").asBoolean(true)));
 
             exchange.getResponseHeaders().set("Content-Type", "text/event-stream; charset=utf-8");
@@ -471,6 +484,7 @@ public class ChatServer {
                     };
                     ObjectNode sessionJson = MAPPER.createObjectNode();
                     sessionJson.put("id", sid);
+                    sessionJson.put("title", agentDialogStore.dialogTitle(sid));
                     listener.on("session", sessionJson);
                     session.runTurn(message, listener);
                     LOG.info("Agent turn completed, session " + sid);
@@ -606,12 +620,14 @@ public class ChatServer {
     }
 
     /**
-     * {@code GET /api/agent/history} — returns the current (most recent)
-     * agent dialog so the page can re-render it after an application restart:
-     * {@code {"sessionId": "...", "entries": [{kind, payload}, ...]}}.
-     * The in-memory session is restored as well, so the dialog can simply be
-     * continued. Without a current dialog: {@code {"sessionId": null,
-     * "entries": []}}.
+     * {@code GET /api/agent/history[?dialog=<id>]} — returns an agent dialog
+     * so the page can re-render it after an application restart: the dialog
+     * from the {@code dialog} query parameter, or the current (most recent)
+     * one when the parameter is absent. Response: {@code {"sessionId": "...",
+     * "entries": [{kind, payload}, ...], "usage"?, "lastTurn"?, "summary"?,
+     * "facts"?, "settings"?}}. The in-memory session is restored as well, so
+     * the dialog can simply be continued. Without a dialog:
+     * {@code {"sessionId": null, "entries": []}}.
      */
     private void handleAgentHistory(HttpExchange exchange) throws IOException {
         try {
@@ -621,11 +637,14 @@ public class ChatServer {
             }
             ObjectNode response = MAPPER.createObjectNode();
             ArrayNode entries = response.putArray("entries");
-            String dialogId = agentDialogStore.currentDialogId();
+            String requested = queryParam(exchange, "dialog");
+            String dialogId = (requested != null && !requested.isBlank())
+                    ? requested : agentDialogStore.currentDialogId();
             if (dialogId != null && agentDialogStore.dialogExists(dialogId)) {
                 // Make sure the session is back in memory with its LLM history
                 agentSessions.computeIfAbsent(dialogId, this::createAgentSession);
                 response.put("sessionId", dialogId);
+                response.put("title", agentDialogStore.dialogTitle(dialogId));
                 for (AgentDialogStore.StoredEntry e
                         : agentDialogStore.loadEntriesExcept(dialogId, "history")) {
                     if ("usage".equals(e.kind())) {
@@ -643,10 +662,27 @@ public class ChatServer {
                         response.set("summary", MAPPER.readTree(e.payload()));
                         continue;
                     }
+                    if ("settings".equals(e.kind())) {
+                        // Settings snapshot written by a checkpoint fork —
+                        // the page applies them to the settings panel
+                        response.set("settings", MAPPER.readTree(e.payload()));
+                        continue;
+                    }
+                    if ("facts".equals(e.kind())) {
+                        // Journaled fact snapshots (for mid-dialog checkpoints) —
+                        // not chat entries; the live list comes from the table
+                        continue;
+                    }
                     ObjectNode entry = MAPPER.createObjectNode();
                     entry.put("kind", e.kind());
                     entry.set("payload", MAPPER.readTree(e.payload()));
                     entries.add(entry);
+                }
+                // Key-value fact memory ("sticky" mode) — from its own table
+                ArrayNode factsArr = response.putArray("facts");
+                for (var f : agentDialogStore.listFacts(dialogId)) {
+                    factsArr.addObject().put("category", f.category())
+                            .put("key", f.key()).put("value", f.value());
                 }
                 LOG.info("GET /api/agent/history: dialog " + dialogId
                         + ", " + entries.size() + " entries");
@@ -657,6 +693,221 @@ public class ChatServer {
         } catch (Exception e) {
             LOG.log(Level.SEVERE, "Agent history request failed", e);
             sendQuietly(exchange, 500, errorJson("History request failed: " + e.getMessage()));
+        }
+    }
+
+    /** Value of one URL query parameter, or {@code null} when absent. */
+    private static String queryParam(HttpExchange exchange, String name) {
+        String rawQuery = exchange.getRequestURI().getRawQuery();
+        if (rawQuery == null) {
+            return null;
+        }
+        for (String pair : rawQuery.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq > 0 && pair.substring(0, eq).equals(name)) {
+                return java.net.URLDecoder.decode(pair.substring(eq + 1), StandardCharsets.UTF_8);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Checkpoints of an agent dialog:
+     * <ul>
+     *   <li>{@code POST /api/agent/checkpoint} — saves a checkpoint of the
+     *       dialog: {@code {"dialogId": "...", "label": "...",
+     *       "settings"?: {...}}}. The snapshot stores the id of the last
+     *       dialog entry (fork boundary) plus the mutable state living outside
+     *       the entries — the fact list and the page settings;</li>
+     *   <li>{@code GET /api/agent/checkpoint?dialog=<id>} — lists the
+     *       dialog's checkpoints;</li>
+     *   <li>{@code DELETE /api/agent/checkpoint?id=<N>} — deletes one.</li>
+     * </ul>
+     */
+    private void handleAgentCheckpoint(HttpExchange exchange) throws IOException {
+        try {
+            switch (exchange.getRequestMethod().toUpperCase()) {
+                case "POST" -> {
+                    String body = new String(exchange.getRequestBody().readAllBytes(),
+                            StandardCharsets.UTF_8);
+                    JsonNode json = MAPPER.readTree(body);
+                    String dialogId = json.path("dialogId").asText("").trim();
+                    if (dialogId.isEmpty() || !agentDialogStore.dialogExists(dialogId)) {
+                        sendJson(exchange, 404, errorJson("Dialog not found: " + dialogId));
+                        return;
+                    }
+                    String label = json.path("label").asText("").trim();
+                    if (label.isEmpty()) {
+                        label = "checkpoint " + java.time.LocalDateTime.now()
+                                .format(java.time.format.DateTimeFormatter
+                                        .ofPattern("dd.MM.yyyy HH:mm"));
+                    }
+                    // Fork boundary: end of dialog, or end of the given turn
+                    // (1-based; turns are counted by user transcript entries)
+                    long entryId;
+                    if (json.has("turn")) {
+                        int turn = json.path("turn").asInt(0);
+                        entryId = agentDialogStore.entryIdAfterTurn(dialogId, turn);
+                        if (entryId < 0) {
+                            sendJson(exchange, 400, errorJson("Dialog " + dialogId
+                                    + " has no turn " + turn));
+                            return;
+                        }
+                    } else {
+                        entryId = agentDialogStore.maxEntryId(dialogId);
+                    }
+                    // Snapshot the mutable out-of-entries state AT THE BOUNDARY:
+                    // the fact list comes from the last journaled "facts" entry
+                    // within the boundary (dialogs saved before journaling fall
+                    // back to the live fact table); page settings are taken as-is
+                    List<AgentProtocol.Fact> factsAtBoundary = null;
+                    List<AgentDialogStore.StoredEntry> factEntries =
+                            agentDialogStore.loadEntriesUpTo(dialogId, "facts", entryId);
+                    if (!factEntries.isEmpty()) {
+                        try {
+                            JsonNode snap = MAPPER.readTree(
+                                    factEntries.get(factEntries.size() - 1).payload());
+                            List<AgentProtocol.Fact> parsed = new ArrayList<>();
+                            for (JsonNode f : snap.path("facts")) {
+                                parsed.add(new AgentProtocol.Fact(
+                                        f.path("category").asText("fact"),
+                                        f.path("key").asText(""),
+                                        f.path("value").asText("")));
+                            }
+                            factsAtBoundary = parsed;
+                        } catch (Exception ex) {
+                            LOG.warning("Malformed facts entry in dialog " + dialogId
+                                    + " — falling back to the live fact table");
+                        }
+                    }
+                    if (factsAtBoundary == null) {
+                        factsAtBoundary = agentDialogStore.listFacts(dialogId);
+                    }
+                    ObjectNode state = MAPPER.createObjectNode();
+                    ArrayNode factsArr = state.putArray("facts");
+                    for (var f : factsAtBoundary) {
+                        factsArr.addObject().put("category", f.category())
+                                .put("key", f.key()).put("value", f.value());
+                    }
+                    if (json.has("settings") && json.get("settings").isObject()) {
+                        state.set("settings", json.get("settings"));
+                    }
+                    AgentDialogStore.Checkpoint cp = agentDialogStore.saveCheckpoint(
+                            dialogId, label, entryId, state.toString());
+                    ObjectNode resp = MAPPER.createObjectNode();
+                    resp.put("id", cp.id());
+                    resp.put("label", cp.label());
+                    resp.put("entryId", cp.entryId());
+                    LOG.info("POST /api/agent/checkpoint: dialog " + dialogId
+                            + ", checkpoint " + cp.id() + " («" + label + "»)"
+                            + (json.has("turn") ? ", turn " + json.path("turn").asInt(0) : ""));
+                    sendJson(exchange, 200, resp.toString());
+                }
+                case "GET" -> {
+                    String dialogId = queryParam(exchange, "dialog");
+                    if (dialogId == null || dialogId.isBlank()) {
+                        sendJson(exchange, 400, errorJson("Query parameter 'dialog' is required."));
+                        return;
+                    }
+                    ObjectNode resp = MAPPER.createObjectNode();
+                    ArrayNode arr = resp.putArray("checkpoints");
+                    for (AgentDialogStore.Checkpoint cp
+                            : agentDialogStore.listCheckpoints(dialogId)) {
+                        ObjectNode o = arr.addObject();
+                        o.put("id", cp.id());
+                        o.put("label", cp.label());
+                        o.put("entryId", cp.entryId());
+                        o.put("createdAt", cp.createdAt());
+                    }
+                    sendJson(exchange, 200, resp.toString());
+                }
+                case "DELETE" -> {
+                    String raw = queryParam(exchange, "id");
+                    if (raw == null || raw.isBlank()) {
+                        sendJson(exchange, 400, errorJson("Query parameter 'id' is required."));
+                        return;
+                    }
+                    long id;
+                    try {
+                        id = Long.parseLong(raw.trim());
+                    } catch (NumberFormatException e) {
+                        sendJson(exchange, 400, errorJson("Invalid checkpoint id: " + raw));
+                        return;
+                    }
+                    boolean deleted = agentDialogStore.deleteCheckpoint(id);
+                    sendJson(exchange, 200, "{\"deleted\":" + deleted + "}");
+                }
+                default -> sendJson(exchange, 405,
+                        errorJson("Method not allowed. Use POST, GET or DELETE."));
+            }
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "Agent checkpoint request failed", e);
+            sendQuietly(exchange, 500, errorJson("Checkpoint request failed: " + e.getMessage()));
+        }
+    }
+
+    /**
+     * {@code POST /api/agent/checkpoint/fork} — materializes a checkpoint into
+     * a NEW independent dialog: {@code {"checkpointId": N}} →
+     * {@code {"dialogId": "...", "title": "..."}}. Entries up to the
+     * checkpoint boundary are copied, the snapshotted facts replace the
+     * (empty) fact table of the new dialog, and the settings snapshot is
+     * stored as a {@code settings} entry the page applies on restore. The
+     * forked dialog opens in a new tab via {@code chat_agent.html?dialog=<id>}.
+     */
+    private void handleAgentCheckpointFork(HttpExchange exchange) throws IOException {
+        try {
+            if (!"POST".equalsIgnoreCase(exchange.getRequestMethod())) {
+                sendJson(exchange, 405, errorJson("Method not allowed. Use POST."));
+                return;
+            }
+            String body = new String(exchange.getRequestBody().readAllBytes(),
+                    StandardCharsets.UTF_8);
+            JsonNode json = MAPPER.readTree(body);
+            long checkpointId = json.path("checkpointId").asLong(-1);
+            AgentDialogStore.Checkpoint cp = checkpointId > 0
+                    ? agentDialogStore.getCheckpoint(checkpointId) : null;
+            if (cp == null) {
+                sendJson(exchange, 404, errorJson("Checkpoint not found: " + checkpointId));
+                return;
+            }
+            if (!agentDialogStore.dialogExists(cp.dialogId())) {
+                sendJson(exchange, 404, errorJson(
+                        "Source dialog of the checkpoint no longer exists: " + cp.dialogId()));
+                return;
+            }
+            JsonNode state;
+            try {
+                state = MAPPER.readTree(cp.stateJson());
+            } catch (Exception e) {
+                state = MAPPER.createObjectNode();
+            }
+            List<AgentProtocol.Fact> facts = new ArrayList<>();
+            for (JsonNode f : state.path("facts")) {
+                facts.add(new AgentProtocol.Fact(f.path("category").asText("fact"),
+                        f.path("key").asText(""), f.path("value").asText("")));
+            }
+            String newId = UUID.randomUUID().toString();
+            String srcTitle = agentDialogStore.dialogTitle(cp.dialogId());
+            String title = (srcTitle.isBlank() ? "Диалог" : srcTitle) + " ⑂ " + cp.label();
+            agentDialogStore.createDialogQuiet(newId, title);
+            agentDialogStore.copyEntriesUpTo(cp.dialogId(), newId, cp.entryId());
+            if (!facts.isEmpty()) {
+                agentDialogStore.replaceFacts(newId, facts);
+            }
+            JsonNode settings = state.path("settings");
+            if (settings.isObject()) {
+                agentDialogStore.appendEntry(newId, "settings", settings.toString());
+            }
+            LOG.info("POST /api/agent/checkpoint/fork: checkpoint " + checkpointId
+                    + " → dialog " + newId + " («" + title + "»), facts: " + facts.size());
+            ObjectNode resp = MAPPER.createObjectNode();
+            resp.put("dialogId", newId);
+            resp.put("title", title);
+            sendJson(exchange, 200, resp.toString());
+        } catch (Exception e) {
+            LOG.log(Level.SEVERE, "Agent checkpoint fork failed", e);
+            sendQuietly(exchange, 500, errorJson("Checkpoint fork failed: " + e.getMessage()));
         }
     }
 

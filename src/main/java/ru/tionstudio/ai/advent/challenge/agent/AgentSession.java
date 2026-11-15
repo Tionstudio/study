@@ -63,7 +63,8 @@ public class AgentSession {
     /** Session settings sent by the page with every message. */
     public record Settings(String compression, int contextMessages,
                            int maxToolCalls, boolean planning,
-                           int summaryKeep, int summaryEvery,
+                           int summaryKeep, int summaryEvery, int slidingMessages,
+                           int stickyKeep, int factsMax, int factsConsolidateEvery,
                            boolean toolsEnabled) {
     }
 
@@ -108,6 +109,20 @@ public class AgentSession {
     private int summaryKeep = 5;
     /** "summary" mode: the summary is regenerated every M new messages. */
     private int summaryEvery = 10;
+    /** "sliding" mode: hard window — only the last N history entries are kept. */
+    private int slidingMessages = 30;
+    /** "sticky" mode: last N user/assistant messages stay verbatim (as lastN). */
+    private int stickyKeep = 20;
+    /** "sticky" mode: max stored facts; the least recently updated are evicted. */
+    private int factsMax = 50;
+    /** "sticky" mode: LLM consolidation of the fact list every M counted messages (0 = off). */
+    private int factsConsolidateEvery = 0;
+    /** "sticky" mode: countedMessages() value at the last consolidation. */
+    private int factsConsolidatedAt = 0;
+    /** Extracted key-value facts ("sticky" mode), mirrored in the dialog store. */
+    private List<AgentProtocol.Fact> facts = new ArrayList<>();
+    /** Persistent storage of the dialog's facts (sticky mode). */
+    private final AgentDialogStore dialogStore;
     /**
      * "summary" mode: compressed older part of the dialog. Stored separately
      * from the history and sent INSTEAD of the entries it covers.
@@ -150,10 +165,12 @@ public class AgentSession {
             java.util.Collections.synchronizedList(new ArrayList<>());
 
     public AgentSession(String id, LlmClient client, AgentTools tools,
+                        AgentDialogStore dialogStore,
                         Map<String, CompletableFuture<Boolean>> permissionRegistry) {
         this.id = id;
         this.client = client;
         this.tools = tools;
+        this.dialogStore = dialogStore;
         this.permissionRegistry = permissionRegistry;
     }
 
@@ -269,7 +286,8 @@ public class AgentSession {
             return;
         }
         if ("lastN".equals(s.compression()) || "none".equals(s.compression())
-                || "summary".equals(s.compression())) {
+                || "summary".equals(s.compression()) || "sliding".equals(s.compression())
+                || "sticky".equals(s.compression())) {
             this.compression = s.compression();
         }
         if (s.contextMessages() > 0) {
@@ -283,6 +301,18 @@ public class AgentSession {
         }
         if (s.summaryEvery() > 0) {
             this.summaryEvery = Math.min(s.summaryEvery(), 200);
+        }
+        if (s.slidingMessages() > 0) {
+            this.slidingMessages = Math.min(s.slidingMessages(), 500);
+        }
+        if (s.stickyKeep() > 0) {
+            this.stickyKeep = Math.min(s.stickyKeep(), 500);
+        }
+        if (s.factsMax() > 0) {
+            this.factsMax = Math.min(s.factsMax(), 500);
+        }
+        if (s.factsConsolidateEvery() >= 0) {
+            this.factsConsolidateEvery = Math.min(s.factsConsolidateEvery(), 1000);
         }
         this.planning = s.planning();
         this.toolsEnabled = s.toolsEnabled();
@@ -356,6 +386,25 @@ public class AgentSession {
         boolean hasUsage = false;
 
         try {
+            // ----- Fact extraction from the user message (compression "sticky") -----
+            // Runs BEFORE the turn so the fresh facts are already in the context
+            // of this very turn. Best-effort: failures do not break the turn.
+            if (!aborted) {
+                LlmClient.ChatResult fx = extractFacts(userMessage, false, listener);
+                if (fx != null) {
+                    llmCalls++;
+                    if (fx.promptTokens() != null) {
+                        totalPrompt += fx.promptTokens();
+                        lastPromptTokens = fx.promptTokens();
+                        hasUsage = true;
+                    }
+                    if (fx.completionTokens() != null) {
+                        totalCompletion += fx.completionTokens();
+                        hasUsage = true;
+                    }
+                }
+            }
+
             // ----- Planning phase -----
             if (planning && !aborted) {
                 // Tell the page the planning phase started — its tokens are
@@ -406,6 +455,24 @@ public class AgentSession {
                     }
                     if (sumResult.completionTokens() != null) {
                         totalCompletion += sumResult.completionTokens();
+                        hasUsage = true;
+                    }
+                }
+            }
+
+            // ----- Fact consolidation (compression "sticky", if enabled) -----
+            if (!aborted && "sticky".equals(compression) && factsConsolidateEvery > 0
+                    && countedMessages() - factsConsolidatedAt >= factsConsolidateEvery) {
+                LlmClient.ChatResult cf = consolidateFacts(listener);
+                if (cf != null) {
+                    llmCalls++;
+                    if (cf.promptTokens() != null) {
+                        totalPrompt += cf.promptTokens();
+                        lastPromptTokens = cf.promptTokens();
+                        hasUsage = true;
+                    }
+                    if (cf.completionTokens() != null) {
+                        totalCompletion += cf.completionTokens();
                         hasUsage = true;
                     }
                 }
@@ -510,6 +577,23 @@ public class AgentSession {
                     history.add(new Entry("assistant", finalReply));
                     emitHistory("assistant", finalReply);
                     emitTranscriptText("assistant", finalReply);
+                    // Sticky mode: harvest decisions and agreements from the final
+                    // answer too — facts entered in the assistant's reply would
+                    // otherwise never reach the key-value memory
+                    if (!aborted) {
+                        LlmClient.ChatResult fx = extractFacts(finalReply, true, listener);
+                        if (fx != null) {
+                            llmCalls++;
+                            if (fx.promptTokens() != null) {
+                                totalPrompt += fx.promptTokens();
+                                hasUsage = true;
+                            }
+                            if (fx.completionTokens() != null) {
+                                totalCompletion += fx.completionTokens();
+                                hasUsage = true;
+                            }
+                        }
+                    }
                     markPlanDone();
                     emitPlan(listener);
                     emitDone(listener, totalPrompt, totalCompletion, hasUsage,
@@ -908,6 +992,11 @@ public class AgentSession {
                     "Краткое содержание предыдущей части диалога (автоматическое summary):\n"
                             + summary));
         }
+        if ("sticky".equals(compression) && !facts.isEmpty()) {
+            // Key-value memory: extracted facts are sent INSTEAD of the older
+            // history (the window below keeps only the last stickyKeep messages)
+            messages.add(new LlmClient.Message("user", factsBlock()));
+        }
         for (Entry e : window) {
             String role = switch (e.role()) {
                 case "user", "assistant" -> e.role();
@@ -915,12 +1004,52 @@ public class AgentSession {
             };
             messages.add(new LlmClient.Message(role, e.content()));
         }
-        return messages;
+        return normalizeRoles(messages);
+    }
+
+    /**
+     * LM Studio-style chat templates require strict user/assistant
+     * alternation and a user message right after the system one. Compression
+     * breaks this naturally: the summary / facts block is a user message that
+     * may be followed by a user message from the window, a sliding window may
+     * start mid-turn at an assistant reply, and several tool notes in a row
+     * are all mapped to the user role. This pass merges consecutive same-role
+     * messages into one and, if the dialogue would start with an assistant
+     * message, prepends a neutral user marker.
+     */
+    private static List<LlmClient.Message> normalizeRoles(List<LlmClient.Message> messages) {
+        List<LlmClient.Message> out = new ArrayList<>(messages.size());
+        for (LlmClient.Message m : messages) {
+            if (!"system".equals(m.role()) && !out.isEmpty()
+                    && out.get(out.size() - 1).role().equals(m.role())) {
+                LlmClient.Message last = out.get(out.size() - 1);
+                out.set(out.size() - 1, new LlmClient.Message(
+                        last.role(), last.content() + "\n\n" + m.content()));
+            } else {
+                out.add(m);
+            }
+        }
+        for (int i = 0; i < out.size(); i++) {
+            if (!"system".equals(out.get(i).role())) {
+                if (!"user".equals(out.get(i).role())) {
+                    out.add(i, new LlmClient.Message("user", "(продолжение диалога)"));
+                }
+                break;
+            }
+        }
+        return out;
     }
 
     private List<Entry> historyWindow() {
         if ("none".equals(compression)) {
             return history;
+        }
+        if ("sliding".equals(compression)) {
+            // Hard sliding window: the last N history entries regardless of
+            // role — tool records count too, and the window may start
+            // mid-turn. Everything older is dropped entirely.
+            int n = Math.max(1, slidingMessages);
+            return history.subList(Math.max(0, history.size() - n), history.size());
         }
         if ("summary".equals(compression)) {
             // Everything the summary covers is replaced by the summary text
@@ -929,7 +1058,9 @@ public class AgentSession {
                     cutIndexForCounted(Math.min(summaryCoveredCounted, countedMessages())),
                     history.size());
         }
-        int n = Math.max(1, contextMessages);
+        // "lastN" and "sticky": last N user/assistant messages verbatim;
+        // tool records stay with their turn (the window starts at a user message)
+        int n = Math.max(1, "sticky".equals(compression) ? stickyKeep : contextMessages);
         int counted = 0;
         int cut = 0;
         for (int i = history.size() - 1; i >= 0; i--) {
@@ -1080,6 +1211,103 @@ public class AgentSession {
 
     public int totalMessages() {
         return history.size();
+    }
+
+    /** Restores the fact list stored before a restart ("sticky" mode). */
+    public void restoreFacts(List<AgentProtocol.Fact> stored) {
+        this.facts = new ArrayList<>(stored);
+    }
+
+    /** Max chars of one message handed to the fact-extraction call. */
+    private static final int FACT_EXCERPT_MAX_CHARS = 1500;
+
+    /** The fact block injected into the context in "sticky" mode. */
+    private String factsBlock() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("Известные факты о пользователе и задаче (долговременная память, ")
+          .append("обновляется автоматически — учитывай их в ответах):\n");
+        for (AgentProtocol.Fact f : facts) {
+            sb.append("- [").append(f.category()).append("] ")
+              .append(f.key()).append(": ").append(f.value()).append("\n");
+        }
+        return sb.toString().trim();
+    }
+
+    /** Pushes the current fact list to the page ("sticky" mode memory panel). */
+    private void emitFacts(Listener listener) throws IOException {
+        ArrayNode arr = MAPPER.createArrayNode();
+        for (AgentProtocol.Fact f : facts) {
+            arr.addObject().put("category", f.category())
+                    .put("key", f.key()).put("value", f.value());
+        }
+        ObjectNode json = MAPPER.createObjectNode();
+        json.set("facts", arr);
+        listener.on("facts", json);
+        // Journal the snapshot: mid-dialog checkpoints restore the fact list
+        // from the last "facts" entry at their boundary
+        emitTranscript("facts", json);
+    }
+
+    /**
+     * Fact extraction for the "sticky" compression mode: one context-free LLM
+     * call turns the text into key-value facts, which are upserted into the
+     * dialog store. Best-effort: any failure is logged, the turn continues.
+     * Returns the call result for token accounting (null when skipped/failed).
+     */
+    private LlmClient.ChatResult extractFacts(String text, boolean fromAssistant,
+                                              Listener listener) throws IOException {
+        if (!"sticky".equals(compression) || text == null || text.isBlank()) {
+            return null;
+        }
+        String excerpt = abbreviate(text, FACT_EXCERPT_MAX_CHARS);
+        LlmClient.ChatResult result = callLlm(
+                List.of(new LlmClient.Message("user",
+                        AgentProtocol.factExtractionPrompt(excerpt, fromAssistant))),
+                listener, false);
+        if (result == null) {
+            return null; // error already reported; extraction is best-effort
+        }
+        List<AgentProtocol.Fact> extracted = AgentProtocol.parseFacts(result.reply());
+        if (!extracted.isEmpty()) {
+            facts = dialogStore.upsertFacts(id, extracted, factsMax);
+            emitFacts(listener);
+            LOG.info("Agent session " + id + ": " + extracted.size() + " fact(s) extracted from "
+                    + (fromAssistant ? "assistant reply" : "user message")
+                    + ", total stored: " + facts.size());
+        }
+        return result;
+    }
+
+    /**
+     * Periodic LLM consolidation of the fact list ("sticky" mode, when
+     * {@code factsConsolidateEvery > 0}): merges duplicates/synonyms and drops
+     * contradicted facts. Best-effort: on failure the old list is kept.
+     */
+    private LlmClient.ChatResult consolidateFacts(Listener listener) throws IOException {
+        factsConsolidatedAt = countedMessages();
+        if (facts.isEmpty()) {
+            return null;
+        }
+        ArrayNode arr = MAPPER.createArrayNode();
+        for (AgentProtocol.Fact f : facts) {
+            arr.addObject().put("category", f.category())
+                    .put("key", f.key()).put("value", f.value());
+        }
+        LlmClient.ChatResult result = callLlm(
+                List.of(new LlmClient.Message("user",
+                        AgentProtocol.factConsolidationPrompt(arr.toString()))),
+                listener, false);
+        if (result == null || result.reply() == null || result.reply().isBlank()) {
+            LOG.warning("Agent session " + id + ": fact consolidation failed, keeping the list");
+            return result;
+        }
+        List<AgentProtocol.Fact> merged = AgentProtocol.parseFacts(result.reply());
+        if (!merged.isEmpty()) {
+            facts = dialogStore.replaceFacts(id, merged);
+            emitFacts(listener);
+            LOG.info("Agent session " + id + ": facts consolidated to " + facts.size());
+        }
+        return result;
     }
 
     private void emitDone(Listener listener, int promptTokens, int completionTokens,

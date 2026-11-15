@@ -546,4 +546,114 @@ public class AgentProtocol {
         }
         return null;
     }
+
+    // ----- Sticky Facts (key-value memory, compression mode "sticky") -----
+
+    /** One extracted fact: a fixed category plus a free-form key and value. */
+    public record Fact(String category, String key, String value) {
+    }
+
+    /** Allowed fact categories; anything else is stored as "fact". */
+    static final Set<String> FACT_CATEGORIES =
+            Set.of("goal", "constraint", "preference", "decision", "fact");
+
+    /** Hard caps for one extraction result. */
+    static final int MAX_FACTS_PER_EXTRACTION = 20;
+    static final int MAX_FACT_KEY_CHARS = 100;
+    static final int MAX_FACT_VALUE_CHARS = 500;
+
+    /**
+     * Prompt for the fact-extraction call. The call is made WITHOUT the dialog
+     * context: just this text plus the instruction to answer with strict JSON.
+     */
+    static String factExtractionPrompt(String text, boolean fromAssistant) {
+        return """
+                Ты извлекаешь факты для долговременной памяти агента (ключ-значение).
+                Ответь СТРОГО одним JSON-объектом, без пояснений и markdown:
+                {"facts": [{"category": "...", "key": "...", "value": "..."}, ...]}
+                Допустимые category: goal (цель пользователя), constraint (ограничение),
+                preference (предпочтение), decision (решение или договорённость), fact (прочий факт).
+                key — короткое имя факта (2-5 слов, по-русски), value — краткая суть.
+                Извлекай только явно сказанное, ничего не додумывай.
+                Если фактов нет, ответь {"facts": []}.
+
+                %s:
+                %s
+                """.formatted(fromAssistant
+                        ? "Ответ ассистента (извлеки принятые решения и договорённости)"
+                        : "Сообщение пользователя", text);
+    }
+
+    /**
+     * Prompt for the periodic consolidation of the stored fact list
+     * (merge duplicates/synonyms, drop contradicted facts).
+     */
+    static String factConsolidationPrompt(String factsJson) {
+        return """
+                Ниже — список фактов долговременной памяти агента в формате JSON.
+                Объедини дубли и синонимы (оставь самое свежее значение), удали факты,
+                которым новые факты явно противоречат. Ничего не добавляй от себя.
+                Ответь СТРОГО одним JSON-объектом тем же форматом, без пояснений:
+                {"facts": [{"category": "...", "key": "...", "value": "..."}, ...]}
+
+                Факты:
+                %s
+                """.formatted(factsJson);
+    }
+
+    /**
+     * Parses the fact-extraction reply. Tolerates markdown fences and prose
+     * around the JSON object; invalid entries are skipped. Never null.
+     */
+    static List<Fact> parseFacts(String reply) {
+        List<Fact> facts = new ArrayList<>();
+        if (reply == null) {
+            return facts;
+        }
+        String text = reply.trim();
+        if (text.startsWith("```")) {
+            text = text.replaceFirst("^```(?:json)?\\s*", "");
+            int end = text.lastIndexOf("```");
+            if (end >= 0) {
+                text = text.substring(0, end);
+            }
+            text = text.trim();
+        }
+        JsonNode json = tryParseJson(text);
+        if (json == null) {
+            // Prose around the object: try the outermost {...} span
+            int start = text.indexOf('{');
+            int end = text.lastIndexOf('}');
+            if (start >= 0 && end > start) {
+                json = tryParseJson(text.substring(start, end + 1));
+            }
+        }
+        if (json != null) {
+            JsonNode arr = json.path("facts");
+            if (arr.isArray()) {
+                for (JsonNode f : arr) {
+                    String category = f.path("category").asText("fact").trim().toLowerCase();
+                    if (!FACT_CATEGORIES.contains(category)) {
+                        category = "fact";
+                    }
+                    String key = f.path("key").asText("").trim();
+                    String value = f.path("value").asText("").trim();
+                    if (key.isEmpty() || value.isEmpty()) {
+                        continue;
+                    }
+                    if (key.length() > MAX_FACT_KEY_CHARS) {
+                        key = key.substring(0, MAX_FACT_KEY_CHARS);
+                    }
+                    if (value.length() > MAX_FACT_VALUE_CHARS) {
+                        value = value.substring(0, MAX_FACT_VALUE_CHARS);
+                    }
+                    facts.add(new Fact(category, key, value));
+                    if (facts.size() >= MAX_FACTS_PER_EXTRACTION) {
+                        break;
+                    }
+                }
+            }
+        }
+        return facts;
+    }
 }

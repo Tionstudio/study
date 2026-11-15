@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Варианты маркера checkpoint — макет</title>
+<style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+        font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;
+        background: #f3f4f6; color: #1a1a1a; padding: 24px;
+    }
+    h1 { font-size: 20px; margin-bottom: 4px; }
+    .lead { color: #6b7280; font-size: 13px; margin-bottom: 24px; }
+    .variant {
+        background: #fff; border: 1px solid #e5e7eb; border-radius: 12px;
+        padding: 16px 20px 20px; margin-bottom: 20px;
+    }
+    .variant h2 { font-size: 15px; margin-bottom: 2px; }
+    .variant .note { font-size: 12px; color: #6b7280; margin-bottom: 14px; }
+    .variant .note code { background: #f3f4f6; padding: 1px 4px; border-radius: 4px; }
+
+    /* --- chat demo (повторяет стили chat_agent.html) --- */
+    .chat {
+        display: flex; flex-direction: column; gap: 8px;
+        background: #fafafa; border: 1px solid #e5e7eb; border-radius: 10px;
+        padding: 14px; padding-right: 44px; /* поле справа под маркеры */
+        position: relative;
+    }
+    .msg {
+        max-width: 78%; padding: 10px 14px; border-radius: 12px;
+        font-size: 14px; line-height: 1.45; position: relative;
+    }
+    .msg.user { align-self: flex-end; background: #2563eb; color: #fff; }
+    .msg.assistant { align-self: flex-start; background: #e5e7eb; color: #1a1a1a; }
+
+    /* строка пары: маркер живёт на правом поле чата, напротив user-пузыря */
+    .pair { position: relative; display: contents; }
+
+    /* базовый маркер на полях: прибит к правому краю чата, по центру пузыря */
+    .marker {
+        position: absolute;
+        right: -36px;            /* выносим на правое поле чата */
+        top: 50%;
+        transform: translateY(-50%);
+        width: 26px; height: 26px;
+        display: flex; align-items: center; justify-content: center;
+        cursor: pointer;
+        opacity: 0;
+        transition: opacity .12s ease, background .12s ease, transform .12s ease;
+        user-select: none;
+        font-size: 15px;
+        color: #6b7280;
+    }
+    /* показ при наведении на само сообщение или на маркер */
+    .msg:hover .marker, .marker:hover { opacity: 1; }
+    .marker.always { opacity: 0.45; }
+    .marker.always:hover { opacity: 1; }
+
+    /* A: плюс в круге */
+    .mk-plus {
+        border: 1.5px solid #d1d5db; border-radius: 50%;
+        background: #fff; font-size: 16px; font-weight: 600; color: #2563eb;
+        box-shadow: 0 1px 2px rgba(0,0,0,.08);
+    }
+    .mk-plus:hover { background: #2563eb; color: #fff; border-color: #2563eb; }
+
+    /* B: глиф ветвления */
+    .mk-branch {
+        border: 1.5px solid #d1d5db; border-radius: 8px;
+        background: #fff; font-size: 14px; color: #2563eb;
+        box-shadow: 0 1px 2px rgba(0,0,0,.08);
+    }
+    .mk-branch:hover { background: #2563eb; color: #fff; border-color: #2563eb; }
+
+    /* C: SVG-иконка fork без рамки */
+    .mk-icon { background: transparent; border: none; }
+    .mk-icon svg { width: 17px; height: 17px; stroke: #9ca3af; fill: none;
+        stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .mk-icon:hover svg { stroke: #2563eb; }
+
+    /* D: текстовый чип на полях */
+    .mk-chip {
+        width: auto; height: auto; padding: 3px 8px;
+        border: 1px solid #d1d5db; border-radius: 7px;
+        background: #fff; font-size: 11px; color: #374151;
+        box-shadow: 0 1px 2px rgba(0,0,0,.08);
+        white-space: nowrap;
+        right: -92px; /* чип шире — дальше на поле */
+    }
+    .demo-wide .chat { padding-right: 104px; }
+    .mk-chip:hover { background: #2563eb; color: #fff; border-color: #2563eb; }
+
+    /* состояние «наведено» для скриншотного сравнения */
+    .state-row { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+    .state-label { font-size: 11px; color: #9ca3af; margin: 6px 0 4px; }
+    .chat.smaller { font-size: 13px; }
+
+    /* мини-демо вкладки, появляющейся по клику */
+    .tabs { display: none; gap: 4px; margin-bottom: 8px; }
+    .tabs.on { display: flex; }
+    .tab {
+        padding: 3px 10px; border: 1px solid #d1d5db; border-radius: 8px;
+        background: #f9fafb; font-size: 12px;
+    }
+    .tab.active { background: #2563eb; color: #fff; border-color: #2563eb; }
+</style>
+</head>
+<body>
+<h1>Маркер создания ветки — варианты</h1>
+<div class="lead">Наведите курсор на синее сообщение пользователя — маркер появится на правом поле чата. Клик в «Варианте A» показывает, как появляется вкладка ветки.</div>
+
+<!-- ============ A: «+» в круге ============ -->
+<div class="variant">
+    <h2>Вариант A — «+» в круге (hover)</h2>
+    <div class="note">Нейтральный «добавить», понятен без подсказки; читается как «новое отсюда». Клик → ветка-вкладка.</div>
+    <div class="tabs" id="tabsA">
+        <div class="tab">Диалог</div>
+        <div class="tab active">Ветка 1 · после пары 2</div>
+    </div>
+    <div class="chat">
+        <div class="msg assistant">Чем помочь?</div>
+        <div class="msg user">Расскажи про окна контекста
+            <span class="marker mk-plus" title="Создать ветку с этого места">+</span>
+        </div>
+        <div class="msg assistant">Контекстное окно — это…</div>
+        <div class="msg user">А чем sliding window отличается от summary?
+            <span class="marker mk-plus" id="plusDemo" title="Создать ветку с этого места">+</span>
+        </div>
+        <div class="msg assistant">Sliding window хранит последние N записей, а summary заменяет старое сводкой…</div>
+    </div>
+</div>
+
+<!-- ============ B: глиф ⑂ ============ -->
+<div class="variant">
+    <h2>Вариант B — глиф «⑂» в скруглённом квадрате (hover)</h2>
+    <div class="note">Семантика «ветвление» явная, но глиф не во всех шрифтах одинаков — ниже вариант с SVG.</div>
+    <div class="chat">
+        <div class="msg user">Запомни: мой любимый цвет — бирюзовый
+            <span class="marker mk-branch" title="Создать ветку с этого места">⑂</span>
+        </div>
+        <div class="msg assistant">Запомнил: бирюзовый.</div>
+        <div class="msg user">А теперь предложи палитру для сайта
+            <span class="marker mk-branch" title="Создать ветку с этого места">⑂</span>
+        </div>
+        <div class="msg assistant">Бирюзовый хорошо сочетается с…</div>
+    </div>
+</div>
+
+<!-- ============ C: SVG-иконка ============ -->
+<div class="variant">
+    <h2>Вариант C — SVG-иконка fork без рамки (hover)</h2>
+    <div class="note">Самый «чистый» вид: тонкая иконка слева-на-полях, без кнопочной рамки; стабильна во всех ОС/шрифтах.</div>
+    <div class="chat">
+        <div class="msg user">Посчитай 128 * 46
+            <span class="marker mk-icon" title="Создать ветку с этого места">
+                <svg viewBox="0 0 24 24"><circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/><circle cx="18" cy="9" r="2.2"/><path d="M6 7v10M6 9c0 4 6 2 10 0"/></svg>
+            </span>
+        </div>
+        <div class="msg assistant">128 × 46 = 5888.</div>
+        <div class="msg user">А теперь раздели на 7
+            <span class="marker mk-icon" title="Создать ветку с этого места">
+                <svg viewBox="0 0 24 24"><circle cx="6" cy="5" r="2.2"/><circle cx="6" cy="19" r="2.2"/><circle cx="18" cy="9" r="2.2"/><path d="M6 7v10M6 9c0 4 6 2 10 0"/></svg>
+            </span>
+        </div>
+        <div class="msg assistant">5888 / 7 ≈ 841,14.</div>
+    </div>
+</div>
+
+<!-- ============ D: текстовый чип ============ -->
+<div class="variant demo-wide">
+    <h2>Вариант D — текстовый чип «⑂ Ветка» на полях (hover)</h2>
+    <div class="note">Максимально понятно без tooltip'а, но занимает больше места — чат получает широкое правое поле.</div>
+    <div class="chat">
+        <div class="msg user">Составь план доклада
+            <span class="marker mk-chip">⑂ Ветка</span>
+        </div>
+        <div class="msg assistant">1. Введение. 2. Основная часть…</div>
+        <div class="msg user">Добавь раздел про риски
+            <span class="marker mk-chip">⑂ Ветка</span>
+        </div>
+        <div class="msg assistant">Готово: раздел «Риски» после второго пункта…</div>
+    </div>
+</div>
+
+<!-- ============ E: статичное сравнение состояний ============ -->
+<div class="variant">
+    <h2>Сравнение: обычное состояние / hover / всегда видимый</h2>
+    <div class="note">Третья колонка — маркер виден всегда (полупрозрачный), если hover не подходит (например, тач-экраны).</div>
+    <div class="state-row">
+        <div style="flex:1; min-width:260px">
+            <div class="state-label">обычное (наведите мышь)</div>
+            <div class="chat smaller">
+                <div class="msg user">Сообщение пользователя
+                    <span class="marker mk-plus">+</span>
+                </div>
+                <div class="msg assistant">Ответ ассистента</div>
+            </div>
+        </div>
+        <div style="flex:1; min-width:260px">
+            <div class="state-label">hover (симуляция)</div>
+            <div class="chat smaller">
+                <div class="msg user">Сообщение пользователя
+                    <span class="marker mk-plus" style="opacity:1">+</span>
+                </div>
+                <div class="msg assistant">Ответ ассистента</div>
+            </div>
+        </div>
+        <div style="flex:1; min-width:260px">
+            <div class="state-label">всегда видимый</div>
+            <div class="chat smaller">
+                <div class="msg user">Сообщение пользователя
+                    <span class="marker mk-plus always">+</span>
+                </div>
+                <div class="msg assistant">Ответ ассистента</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Мини-демо: клик по «+» в варианте A показывает появление вкладки ветки
+    document.getElementById('plusDemo').addEventListener('click', () => {
+        document.getElementById('tabsA').classList.toggle('on');
+    });
+</script>
+</body>
+</html>
