@@ -116,6 +116,8 @@ public class ChatServer {
         server.createContext("/api/presets", this::handlePresets);
         server.createContext("/api/conversations", this::handleConversations);
         server.createContext("/api/models", this::handleModels);
+        new AgentV2Controller(clientsById, modelConfigs, defaultClient,
+                agentTools, permissionRegistry).register(server);
         server.createContext("/", this::handleStatic);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.start();

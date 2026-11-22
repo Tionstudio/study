@@ -1,0 +1,1175 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Агент v2 — слои памяти</title>
+    <style>
+        :root {
+            --bg: oklch(0.975 0.008 230);
+            --surface: oklch(0.995 0.003 220);
+            --ink: oklch(0.24 0.035 235);
+            --muted: oklch(0.48 0.025 230);
+            --line: oklch(0.88 0.015 230);
+            --accent: oklch(0.58 0.12 190);
+            --accent-dark: oklch(0.45 0.11 190);
+            --danger: oklch(0.52 0.18 25);
+            --code: ui-monospace, "Cascadia Code", Consolas, monospace;
+        }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0; height: 100dvh; padding: 20px; overflow: hidden;
+            background: var(--bg); color: var(--ink);
+            font-family: "Segoe UI", "PT Sans", sans-serif; font-size: 14px;
+        }
+        button, input, select, textarea { font: inherit; }
+        button, select, input, textarea { outline-offset: 3px; }
+        :focus-visible { outline: 2px solid var(--accent-dark); }
+        button { cursor: pointer; }
+        button:disabled, input:disabled, select:disabled, textarea:disabled { cursor: not-allowed; opacity: .55; }
+        .app { max-width: 1720px; height: calc(100dvh - 40px); min-height: 0; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+        .header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+        h1 { margin: 0; font-size: 21px; letter-spacing: -.02em; }
+        .badge { padding: 3px 8px; border-radius: 6px; background: var(--ink); color: var(--surface); font: 11px var(--code); }
+        .nav { margin-left: auto; display: flex; gap: 12px; }
+        .nav a { color: var(--accent-dark); text-decoration: none; }
+        .nav a:hover { text-decoration: underline; }
+        .workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) minmax(400px, 500px); gap: 14px; }
+        .main { min-width: 0; min-height: 0; display: flex; flex-direction: column; gap: 10px; }
+        .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+        .settings { padding: 12px 14px; }
+        .settings fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+        .settings-grid { display: grid; grid-template-columns: repeat(4, minmax(150px, 1fr)); gap: 10px 14px; align-items: end; }
+        .control { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+        .control label, .label { font-size: 12px; font-weight: 600; color: var(--muted); }
+        select, input[type="number"], textarea {
+            width: 100%; border: 1px solid var(--line); border-radius: 7px;
+            background: var(--surface); color: var(--ink); padding: 7px 9px;
+        }
+        .checks { grid-column: 1 / -1; display: flex; gap: 16px; align-items: center; min-height: 35px; flex-wrap: wrap; }
+        .checks label { display: flex; gap: 7px; align-items: center; white-space: nowrap; }
+        .settings-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; padding-top: 2px; }
+        .btn {
+            min-height: 34px; padding: 6px 11px; border: 1px solid var(--line); border-radius: 7px;
+            background: var(--surface); color: var(--ink); transition: background .15s ease, transform .15s ease;
+        }
+        .btn:hover:not(:disabled) { background: var(--bg); }
+        .btn:active:not(:disabled) { transform: translateY(1px); }
+        .btn.primary { background: var(--accent-dark); border-color: var(--accent-dark); color: var(--surface); }
+        .btn.primary:hover:not(:disabled) { background: var(--accent); }
+        .btn.danger { color: var(--danger); border-color: color-mix(in oklch, var(--danger), var(--surface) 55%); }
+        .btn.small { min-height: 29px; padding: 4px 8px; font-size: 12px; }
+        .chat-panel { flex: 1; min-height: 320px; display: flex; flex-direction: column; overflow: hidden; }
+        #chat { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 10px; }
+        .empty { margin: auto; max-width: 480px; text-align: center; color: var(--muted); line-height: 1.6; }
+        .msg { max-width: 88%; padding: 10px 13px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+        .msg.user { align-self: flex-end; background: var(--accent-dark); color: var(--surface); border-bottom-right-radius: 4px; }
+        .msg.assistant { align-self: flex-start; background: var(--bg); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+        .msg.assistant.md { white-space: normal; }
+        .msg.assistant.md p { margin: 4px 0; }
+        .msg.assistant.md .md-h { font-weight: 600; margin: 10px 0 4px; }
+        .msg.assistant.md .md-h1 { font-size: 17px; }
+        .msg.assistant.md .md-h2 { font-size: 15.5px; }
+        .msg.assistant.md .md-h3, .msg.assistant.md .md-h4 { font-size: 14px; }
+        .msg.assistant.md .md-list { margin: 4px 0 4px 22px; padding: 0; }
+        .msg.assistant.md .md-list li { margin: 2px 0; }
+        .msg.assistant.md .md-table { border-collapse: collapse; margin: 6px 0; font-size: 13px; }
+        .msg.assistant.md .md-table th, .msg.assistant.md .md-table td { border: 1px solid var(--line); padding: 4px 10px; text-align: left; }
+        .msg.assistant.md .md-table th { background: var(--bg); font-weight: 600; }
+        .msg.assistant.md code { background: color-mix(in oklch, var(--ink), transparent 92%); padding: 1px 5px; border-radius: 4px; font: 12.5px var(--code); }
+        .msg.assistant.md .md-code { padding: 10px 12px; border-radius: 8px; overflow-x: auto; margin: 6px 0; background: var(--ink); color: var(--surface); font-size: 12.5px; }
+        .msg.assistant.md .md-code code { background: none; padding: 0; }
+        .msg.assistant.md .md-quote { border-left: 3px solid var(--line); margin: 4px 0; padding: 2px 10px; color: var(--muted); }
+        .msg.assistant.md .md-hr { border: 0; border-top: 1px solid var(--line); margin: 8px 0; }
+        .msg.assistant.md a { color: var(--accent-dark); }
+        .msg.error { align-self: stretch; max-width: 100%; color: var(--danger); background: oklch(0.96 0.025 25); }
+        .msg.note { align-self: center; max-width: 95%; padding: 3px 8px; color: var(--muted); font-size: 12px; }
+        .msg.analysis { align-self: stretch; max-width: 100%; border: 1px solid var(--accent); background: var(--surface); }
+        .msg.analysis strong { display: block; margin-bottom: 8px; }
+        .msg.analysis .analysis-save { margin-top: 10px; }
+        .event-block { align-self: stretch; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+        .event-block summary { padding: 7px 10px; cursor: pointer; color: var(--muted); font: 12px var(--code); }
+        .event-block pre { margin: 0; padding: 10px; border-top: 1px solid var(--line); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 260px; overflow-y: auto; font: 12px/1.5 var(--code); }
+        .llm-call { color: var(--muted); background: color-mix(in oklch, var(--surface), var(--bg) 45%); }
+        .llm-call > summary { font-family: inherit; }
+        .llm-call:not([open]), .reasoning-block:not([open]) { border-color: transparent; background: transparent; }
+        .llm-call:not([open]) > summary, .reasoning-block:not([open]) > summary { padding: 2px 5px; opacity: .62; font-size: 11px; }
+        .llm-body { padding: 7px 10px 9px; border-top: 1px solid var(--line); }
+        .llm-plan { margin: 0 0 8px 20px; padding: 0; color: var(--ink); font-size: 12px; line-height: 1.5; }
+        .llm-plan li.done { color: var(--muted); text-decoration: line-through; }
+        .llm-plan li.in_progress { font-weight: 600; }
+        .llm-details { margin-top: 5px; }
+        .llm-details > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+        .llm-reasoning pre { margin: 5px 0 0; padding: 8px; max-height: 190px; overflow: auto; border-radius: 6px; background: var(--bg); white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.45 var(--code); }
+        .llm-data { margin-top: 7px; }
+        .llm-data:first-child { margin-top: 0; }
+        .llm-data h4 { margin: 0 0 3px; color: var(--muted); font-size: 10px; font-weight: 600; text-transform: uppercase; }
+        .llm-data pre { margin: 0; padding: 8px; max-height: 190px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.45 var(--code); scrollbar-width: thin; }
+        .plan { padding: 10px 12px; border-left: 3px solid var(--accent); background: var(--bg); }
+        .plan li { margin: 3px 0 3px 18px; }
+        .plan li.done { text-decoration: line-through; color: var(--muted); }
+        .permission { padding: 10px; border: 1px solid oklch(0.75 0.12 80); border-radius: 8px; }
+        .permission-actions { display: flex; gap: 8px; margin-top: 8px; }
+        .typing { margin: 0 16px 12px; display: flex; align-items: center; gap: 9px; color: var(--muted); }
+        .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s infinite; }
+        @keyframes pulse { 50% { opacity: .3; transform: scale(.8); } }
+        .runbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+        .chips { display: flex; gap: 5px; flex-wrap: wrap; }
+        .answer-stats { align-self: flex-start; max-width: 88%; margin: -6px 0 0 5px; gap: 2px 9px; }
+        .chip { padding: 3px 7px; border-radius: 6px; background: var(--surface); border: 1px solid var(--line); color: var(--muted); font: 11px var(--code); }
+        .answer-stats .chip { padding: 0; border: 0; background: transparent; font-size: 10px; line-height: 1.35; }
+        .composer { padding: 11px; display: flex; flex-direction: column; gap: 9px; }
+        .input-row { display: flex; gap: 8px; }
+        #input { min-height: 62px; resize: vertical; }
+        #send { align-self: stretch; min-width: 105px; }
+        .dialog-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        .file { max-width: 260px; font-size: 12px; }
+        #scriptResults { display: none; padding: 12px; overflow-x: auto; }
+        #scriptResults table { width: 100%; border-collapse: collapse; font-size: 12px; }
+        #scriptResults th, #scriptResults td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: left; }
+        .inspector { min-height: 0; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+        .inspector h2 { margin: 0; font-size: 16px; }
+        .inspector-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+        .memory-section { border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+        .memory-section > summary { padding: 9px 11px; cursor: pointer; font-weight: 600; background: var(--bg); }
+        .memory-body { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+        .memory-body pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 var(--code); max-height: 260px; overflow-y: auto; }
+        .memory-body textarea { min-height: 110px; resize: vertical; font: 12px/1.5 var(--code); }
+        .row-actions { display: flex; gap: 7px; flex-wrap: wrap; }
+        .st-block { padding: 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+        .st-section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: 12px; }
+        .memory-body .summary-box { min-height: 42px; max-height: 180px; padding: 8px; border-radius: 6px; background: var(--surface); }
+        .summary-box.empty-text { color: var(--muted); }
+        .facts-list { display: flex; flex-direction: column; max-height: 240px; margin-bottom: 7px; overflow-y: auto; scrollbar-width: thin; border-top: 1px solid var(--line); }
+        .fact-row { display: grid; grid-template-columns: 24px minmax(0, .85fr) minmax(0, 1.3fr) 25px; gap: 6px; align-items: center; min-height: 34px; padding: 4px 2px; border-bottom: 1px solid var(--line); background: var(--surface); }
+        .fact-row:not(.editing) { cursor: default; }
+        .fact-row:not(.editing):hover { background: var(--bg); }
+        .fact-type { text-align: center; cursor: help; font-size: 14px; }
+        .fact-key, .fact-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+        .fact-key { font-weight: 600; }
+        .fact-value { color: var(--muted); }
+        .fact-row .delete-fact { min-width: 25px; min-height: 25px; padding: 1px; border-color: transparent; background: transparent; }
+        .fact-row.editing { grid-template-columns: 82px minmax(0, .85fr) minmax(0, 1.3fr); padding: 4px; }
+        .fact-row.editing input, .fact-row.editing select { min-width: 0; padding: 5px 6px; font-size: 12px; }
+        .facts-empty { padding: 10px 3px; border-bottom: 1px solid var(--line); }
+        .st-title-group { display: flex; align-items: center; gap: 6px; }
+        .raw-editor summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+        .raw-editor textarea { margin: 8px 0; }
+        .rules-list, .rule-candidates { display: flex; flex-direction: column; max-height: 240px; overflow-y: auto; scrollbar-width: thin; border-top: 1px solid var(--line); }
+        .rule-candidates { max-height: none; border-top: 0; }
+        .rule, .rule-candidate { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; gap: 6px; align-items: center; min-height: 34px; padding: 4px 2px; border-bottom: 1px solid var(--line); }
+        .rule:hover, .rule-candidate:hover { background: var(--bg); }
+        .rule-type-icon { text-align: center; cursor: help; font-size: 14px; }
+        .rule-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; cursor: text; }
+        .rule.disabled .rule-text { color: var(--muted); text-decoration: line-through; }
+        .rule .delete-rule { min-width: 25px; min-height: 25px; padding: 1px; border-color: transparent; background: transparent; }
+        .rule.editing { grid-template-columns: 88px minmax(0, 1fr); align-items: start; }
+        .rule.editing textarea { min-height: 58px; resize: vertical; font: 12px/1.4 inherit; }
+        .rule-candidate { grid-template-columns: 20px minmax(0, 1fr) auto; }
+        .rule-candidate .candidate-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; cursor: text; }
+        .rule-candidate textarea { grid-column: 1 / -1; min-height: 54px; font: 12px/1.4 inherit; }
+        .rule-candidate .row-actions { flex-wrap: nowrap; }
+        .rule-candidate-meta { grid-column: 1 / -1; color: var(--muted); font-size: 11px; }
+        .lt-actions { display: flex; align-items: center; gap: 12px; margin-top: 7px; }
+        .lt-actions details { margin-left: auto; }
+        .log-item { border-bottom: 1px solid var(--line); }
+        .log-item:last-child { border-bottom: 0; }
+        .log-item summary { padding: 8px 4px; cursor: pointer; font: 11px var(--code); }
+        .log-item pre { padding: 7px; background: var(--bg); border-radius: 6px; }
+        .status { min-height: 18px; color: var(--muted); font-size: 12px; }
+        .status.error { color: var(--danger); }
+        .hidden { display: none !important; }
+        @media (max-width: 1250px) {
+            .settings-grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
+            .workspace { grid-template-columns: minmax(0, 1fr) 400px; }
+        }
+        @media (max-width: 900px) {
+            body { height: auto; min-height: 100dvh; padding: 10px; overflow: auto; }
+            .app { height: auto; }
+            .workspace { grid-template-columns: 1fr; }
+            .chat-panel { height: 60dvh; min-height: 420px; }
+            .inspector { max-height: none; overflow: visible; }
+            .nav { margin-left: 0; }
+        }
+        @media (max-width: 520px) {
+            .settings-grid { grid-template-columns: 1fr; }
+            .input-row { flex-direction: column; }
+            #send { min-height: 44px; }
+            .msg { max-width: 96%; }
+            .btn { min-height: 44px; }
+            .fact-row { grid-template-columns: 22px minmax(0, .85fr) minmax(0, 1.3fr) 30px; gap: 4px; }
+            .fact-row.editing { grid-template-columns: 72px minmax(0, .85fr) minmax(0, 1.3fr); }
+            .fact-row .delete-fact { min-height: 36px; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { animation: none !important; transition: none !important; }
+        }
+    </style>
+</head>
+<body>
+<div class="app">
+    <header class="header">
+        <h1>Агент с явной памятью</h1><span class="badge">v2</span>
+        <nav class="nav"><a href="/chat_agent.html">Агент v1</a><a href="/index.html">Обычный чат</a></nav>
+    </header>
+
+    <div class="workspace">
+        <main class="main">
+            <section class="panel settings" aria-label="Настройки агента">
+                <fieldset id="settingsFieldset">
+                    <div class="settings-grid">
+                        <div class="control"><label for="mainModel">Основная модель</label><select id="mainModel"></select></div>
+                        <div class="control"><label for="analysisModel">Модель анализа</label><select id="analysisModel"></select></div>
+                        <div class="control"><label for="compression">Сжатие short-term</label>
+                            <select id="compression">
+                                <option value="none">Без сжатия</option><option value="lastN">Последние N сообщений</option>
+                                <option value="sliding">Sliding Window</option>
+                                <option value="summary" selected>Summary + последние N</option>
+                            </select>
+                        </div>
+                        <div class="control"><label for="windowSize" id="windowLabel">N / размер окна</label><input id="windowSize" type="number" min="1" max="500" value="20"></div>
+                        <div class="control" id="everyControl"><label for="summaryEvery">Summary: каждые M</label><input id="summaryEvery" type="number" min="1" max="200" value="10"></div>
+                        <div class="control"><label for="stickyKeep">Факты: пакет M сообщений</label><input id="stickyKeep" type="number" min="1" max="500" value="20"></div>
+                        <div class="control"><label for="factsMax">Максимум sticky-фактов</label><input id="factsMax" type="number" min="5" max="500" value="50"></div>
+                        <div class="control"><label for="maxToolCalls">Максимум вызовов подряд</label><input id="maxToolCalls" type="number" min="1" max="50" value="5"></div>
+                        <div class="checks"><label><input id="stickyFacts" type="checkbox" checked> Sticky-факты</label><label><input id="planning" type="checkbox"> Планирование</label><label><input id="tools" type="checkbox"> Инструменты</label></div>
+                        <div class="settings-actions">
+                            <button id="newTask" class="btn" type="button">Новая задача</button>
+                            <button id="resetAll" class="btn danger" type="button">Сбросить всё</button>
+                        </div>
+                    </div>
+                </fieldset>
+            </section>
+
+            <section class="panel chat-panel" aria-label="Диалог">
+                <div id="chat"><div class="empty">Начните диалог. Состав памяти и фактические запросы к модели видны в панели справа.</div></div>
+                <div id="typing" class="typing hidden"><span class="pulse"></span><span id="typingText">Агент работает…</span></div>
+            </section>
+
+            <div class="runbar">
+                <button id="pauseBtn" class="btn hidden" type="button">Пауза</button>
+                <button id="abortBtn" class="btn danger hidden" type="button">Прервать</button>
+                <div id="turnChips" class="chips"></div>
+            </div>
+            <section id="scriptResults" class="panel"></section>
+
+            <section class="panel composer" aria-label="Ввод запроса">
+                <div class="input-row"><textarea id="input" placeholder="Введите запрос… Enter — отправить, Shift+Enter — новая строка"></textarea><button id="send" class="btn primary" type="button">Отправить</button></div>
+                <div class="dialog-actions">
+                    <input id="scriptFile" class="file" type="file" accept=".json,application/json" aria-label="JSON-скрипт диалога">
+                    <button id="runScript" class="btn" type="button" disabled>Запустить скрипт</button>
+                    <button id="analyzeDialog" class="btn" type="button">Анализ диалога</button>
+                    <button id="analyzeScript" class="btn" type="button" disabled>Анализ скрипта</button>
+                </div>
+                <div id="status" class="status" role="status"></div>
+            </section>
+        </main>
+
+        <aside class="panel inspector" aria-label="Состояние агента">
+            <div class="inspector-head"><h2>Состояние агента</h2><button id="refreshAll" class="btn small" type="button">Обновить</button></div>
+            <div id="layerChips" class="chips"></div>
+            <details class="memory-section"><summary>Системный промпт</summary><div class="memory-body"><pre id="systemPrompt"></pre></div></details>
+
+            <details class="memory-section" open><summary>Short-term — текущий диалог</summary><div class="memory-body">
+                <div id="stMeta" class="chips"></div>
+                <section class="st-block" aria-label="Сводка диалога">
+                    <div class="st-section-head"><strong>Сводка диалога</strong></div>
+                    <pre id="summaryText" class="summary-box"></pre>
+                </section>
+                <section class="st-block" aria-label="Sticky-факты">
+                    <div class="st-section-head"><strong>Sticky-факты</strong><div class="st-title-group"><span id="factsCount" class="chip">0</span><button id="clearFacts" class="btn small danger" type="button" title="Очистить все факты" aria-label="Очистить все факты">🗑</button></div></div>
+                    <div id="factsList" class="facts-list"></div>
+                    <button id="addFact" class="btn small" type="button">+ Добавить факт</button>
+                </section>
+                <details class="raw-editor"><summary>Исходный JSON фактов</summary>
+                    <textarea id="factsEditor" aria-label="JSON sticky-фактов"></textarea>
+                    <button id="applyStJson" class="btn small" type="button">Применить и сохранить</button>
+                </details>
+                <div class="row-actions"><button id="clearSt" class="btn small danger" type="button">Очистить ST</button></div>
+            </div></details>
+
+            <details class="memory-section" open><summary>Working — активная задача</summary><div class="memory-body">
+                <textarea id="workingEditor" aria-label="JSON working-памяти"></textarea>
+                <div class="row-actions"><button id="saveWt" class="btn small" type="button">Сохранить WT</button><button id="clearWt" class="btn small danger" type="button">Очистить WT</button></div>
+            </div></details>
+
+            <details class="memory-section" open><summary>Long-term — конфиг агента</summary><div class="memory-body">
+                <div id="ruleCandidates" class="rule-candidates"></div>
+                <div id="rulesList" class="rules-list"></div>
+                <div class="lt-actions"><button id="addRule" class="btn small" type="button">＋ Добавить</button><button id="clearLt" class="btn small danger" type="button">Очистить LT</button>
+                <details><summary>{ } JSON</summary><textarea id="ltEditor" aria-label="Исходный JSON конфига агента"></textarea><button id="applyLtJson" class="btn small" type="button">Применить JSON</button></details></div>
+            </div></details>
+
+            <details class="memory-section"><summary>Запросы и ответы LLM as is</summary><div class="memory-body"><button id="refreshLlm" class="btn small" type="button">Обновить журнал</button><div id="llmLog"></div></div></details>
+            <details class="memory-section"><summary>Действия пользователя</summary><div class="memory-body"><button id="refreshActions" class="btn small" type="button">Обновить журнал</button><div id="actionLog"></div></div></details>
+        </aside>
+    </div>
+</div>
+
+<script>
+    const $ = id => document.getElementById(id);
+    const chatEl = $('chat');
+    let sessionId = null;
+    let busy = false;
+    let paused = false;
+    let scriptActive = false;
+    let abortRequested = false;
+    let scriptPauseRequested = false;
+    let scriptPauseResume = null;
+    let currentMemory = {};
+    let scriptData = null;
+    let scriptDialogIds = [];
+    let lastScriptResults = [];
+    let dialogStats = emptyDialogStats();
+    const pendingDecisions = new Map();
+
+    function escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+    function renderMarkdown(src) {
+        const lines = String(src).replace(/\r\n/g, '\n').split('\n');
+        let html = '', para = [], i = 0;
+        const inline = text => {
+            let t = escapeHtml(text);
+            t = t.replace(/`([^`]+)`/g, '<code>$1</code>');
+            t = t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+            t = t.replace(/__([^_]+)__/g, '<strong>$1</strong>');
+            t = t.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+            t = t.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+            return t;
+        };
+        const flushPara = () => {
+            if (para.length) { html += '<p>' + para.map(inline).join('<br>') + '</p>'; para = []; }
+        };
+        const splitRow = row => row.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+        while (i < lines.length) {
+            const line = lines[i];
+            if (/^\s*```/.test(line)) {
+                flushPara(); const code = []; i++;
+                while (i < lines.length && !/^\s*```/.test(lines[i])) { code.push(lines[i]); i++; }
+                const closing = i < lines.length ? lines[i] : ''; i++;
+                html += '<pre class="md-code"><code>' + escapeHtml(code.join('\n')) + '</code></pre>';
+                const rest = closing.replace(/^\s*```\s*/, ''); if (rest) para.push(rest);
+                continue;
+            }
+            if (line.includes('|') && i + 1 < lines.length && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1]) && lines[i + 1].includes('-')) {
+                flushPara(); const headers = splitRow(line); i += 2; const rows = [];
+                while (i < lines.length && lines[i].includes('|') && lines[i].trim() !== '') { rows.push(splitRow(lines[i])); i++; }
+                html += '<table class="md-table"><thead><tr>' + headers.map(h => '<th>' + inline(h) + '</th>').join('')
+                    + '</tr></thead><tbody>' + rows.map(r => '<tr>' + r.map(c => '<td>' + inline(c) + '</td>').join('') + '</tr>').join('') + '</tbody></table>';
+                continue;
+            }
+            const h = line.match(/^(#{1,4})\s+(.*)$/);
+            if (h) { flushPara(); html += '<div class="md-h md-h' + h[1].length + '">' + inline(h[2]) + '</div>'; i++; continue; }
+            if (/^\s*>\s?/.test(line)) { flushPara(); html += '<blockquote class="md-quote">' + inline(line.replace(/^\s*>\s?/, '')) + '</blockquote>'; i++; continue; }
+            if (/^\s*(-{3,}|\*{3,})\s*$/.test(line)) { flushPara(); html += '<hr class="md-hr">'; i++; continue; }
+            if (/^\s*([-*+]|\d+\.)\s+/.test(line)) {
+                flushPara(); const ordered = /^\s*\d+\./.test(line), items = [];
+                while (i < lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, '')); i++; }
+                const tag = ordered ? 'ol' : 'ul';
+                html += '<' + tag + ' class="md-list">' + items.map(it => '<li>' + inline(it) + '</li>').join('') + '</' + tag + '>';
+                continue;
+            }
+            if (line.trim() === '') { flushPara(); i++; continue; }
+            para.push(line); i++;
+        }
+        flushPara(); return html;
+    }
+    function renderAssistantMarkdown(el, text) {
+        el.classList.add('md'); el.innerHTML = renderMarkdown(text);
+    }
+    function addAssistantMessage(text) {
+        const el = addMessage('', 'assistant'); renderAssistantMarkdown(el, text); return el;
+    }
+    function scrollChat() { chatEl.scrollTop = chatEl.scrollHeight; }
+    function setStatus(text, error = false) { $('status').textContent = text || ''; $('status').classList.toggle('error', error); }
+    function addMessage(text, kind = 'assistant') {
+        chatEl.querySelector('.empty')?.remove();
+        const el = document.createElement('div');
+        el.className = 'msg ' + kind;
+        el.textContent = text;
+        chatEl.appendChild(el); scrollChat(); return el;
+    }
+    function addEventBlock(title, payload) {
+        const el = document.createElement('details'); el.className = 'event-block';
+        el.innerHTML = '<summary>' + escapeHtml(title) + '</summary><pre>' + escapeHtml(typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2)) + '</pre>';
+        chatEl.appendChild(el); scrollChat(); return el;
+    }
+    function appendLlmDataBlocks(container, log) {
+        const response = String(log.response ?? '').trim() ? String(log.response) : '(пустой ответ модели или запрос завершился с ошибкой)';
+        let responseText = response;
+        try { responseText = JSON.stringify(JSON.parse(response), null, 2); } catch { /* Plain-text replies stay as is. */ }
+        const sections = [
+            ['Запрос', log.request == null ? '(запрос отсутствует в журнале)' : JSON.stringify(log.request, null, 2)],
+            ['Ответ', responseText],
+            ['Слои памяти', JSON.stringify(log.layers || {}, null, 2)],
+            ['Токены', JSON.stringify(log.usage || {}, null, 2)]
+        ];
+        const type = document.createElement('div'); type.className = 'status'; type.textContent = 'Технический тип: ' + (log.kind || 'unknown'); container.appendChild(type);
+        for (const [label, text] of sections) {
+            const section = document.createElement('section'); section.className = 'llm-data';
+            section.innerHTML = '<h4>' + escapeHtml(label) + '</h4><pre>' + escapeHtml(text) + '</pre>';
+            container.appendChild(section);
+        }
+    }
+    function renderLlmCall(log) {
+        if (!log || log.kind === 'chat') return null;
+        const labels = {planning:'Планирование', extract_st:'Извлечение фактов', sticky_extract:'Извлечение фактов', working_update:'Обновление задачи', summary:'Сжатие диалога', facts_consolidate:'Объединение фактов', lt_candidates:'Поиск предпочтений для LT', lt_bootstrap:'Первичная настройка LT', service:'Служебная операция'};
+        const usage = log.usage || {};
+        const title = (labels[log.kind] || 'Служебная операция')
+            + (Number.isFinite(log.durationMs) ? ' · ' + (log.durationMs / 1000).toFixed(1) + ' с' : '')
+            + (Number.isFinite(usage.totalTokens) ? ' · ' + usage.totalTokens + ' ток.' : '');
+        const el = document.createElement('details'); el.className = 'event-block llm-call'; el.dataset.kind = log.kind || '';
+        el.innerHTML = '<summary>' + escapeHtml(title) + '</summary><div class="llm-body"></div>';
+        const body = el.querySelector('.llm-body');
+        if (log.kind !== 'chat' && log.reasoning) {
+            const reasoning = document.createElement('details'); reasoning.className = 'llm-details llm-reasoning';
+            reasoning.innerHTML = '<summary>🧠 Размышления · ' + log.reasoning.length + ' симв.</summary><pre>' + escapeHtml(log.reasoning) + '</pre>';
+            body.appendChild(reasoning);
+        }
+        if (log.kind === 'planning') {
+            const details = document.createElement('details'); details.className = 'llm-details';
+            details.innerHTML = '<summary>Технические подробности</summary><div class="llm-tech-body"></div>';
+            appendLlmDataBlocks(details.querySelector('.llm-tech-body'), log); body.appendChild(details);
+        } else {
+            appendLlmDataBlocks(body, log);
+        }
+        chatEl.appendChild(el); scrollChat(); return el;
+    }
+    function attachPlanToLlm(steps) {
+        const blocks = chatEl.querySelectorAll('.llm-call[data-kind="planning"]');
+        const el = blocks[blocks.length - 1]; if (!el) return false;
+        const body = el.querySelector('.llm-body');
+        const list = body.querySelector('.llm-plan') || document.createElement('ol'); list.className = 'llm-plan';
+        list.innerHTML = (steps || []).map(s => '<li class="' + escapeHtml(s.status || '') + '">' + escapeHtml(s.title || s) + '</li>').join('');
+        if (!list.parentNode) body.insertBefore(list, body.firstChild);
+        el.classList.add('has-plan'); scrollChat(); return true;
+    }
+    function addPlan(steps) {
+        const el = document.createElement('div'); el.className = 'plan';
+        el.innerHTML = '<strong>План</strong><ul>' + (steps || []).map(s => '<li class="' + escapeHtml(s.status) + '">' + escapeHtml(s.title) + '</li>').join('') + '</ul>';
+        chatEl.appendChild(el); scrollChat();
+    }
+    function addDecision(id, text, yesLabel = 'Разрешить', noLabel = 'Запретить') {
+        const el = document.createElement('div'); el.className = 'permission';
+        el.innerHTML = '<div class="decision-text">' + escapeHtml(text) + '</div><div class="permission-actions"></div>';
+        const actions = el.querySelector('.permission-actions');
+        for (const [label, allow] of [[yesLabel, true], [noLabel, false]]) {
+            const btn = document.createElement('button'); btn.className = 'btn small'; btn.textContent = label;
+            btn.onclick = async () => {
+                actions.querySelectorAll('button').forEach(b => b.disabled = true);
+                try {
+                    const response = await fetch('/api/agent/permission', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({requestId:id, allow})});
+                    if (!response.ok) throw new Error(await response.text());
+                } catch (e) {
+                    actions.querySelectorAll('button').forEach(b => b.disabled = false);
+                    setStatus('Не удалось отправить решение: ' + e.message, true);
+                }
+            };
+            actions.appendChild(btn);
+        }
+        pendingDecisions.set(id, el);
+        chatEl.appendChild(el); scrollChat();
+    }
+    function addPermission(d) {
+        addDecision(d.id, 'Разрешить ' + (d.action || 'операцию') + ' для «' + (d.file || '') + '»?'
+            + (d.preview ? '\n\nФрагмент:\n' + d.preview : ''));
+    }
+    function resolveDecision(d) {
+        const el = pendingDecisions.get(d.id); if (!el) return;
+        el.querySelectorAll('button').forEach(b => b.disabled = true);
+        const status = document.createElement('div'); status.className = 'status';
+        status.textContent = d.allowed ? 'Разрешено' : 'Запрещено'; el.appendChild(status);
+        pendingDecisions.delete(d.id);
+    }
+
+    function settingsPayload(overrides = {}) {
+        const mode = overrides.compression || $('compression').value;
+        const n = Number(overrides.windowSize || $('windowSize').value || 20);
+        return {
+            model: overrides.model || $('mainModel').value,
+            compression: mode, contextMessages: n, slidingMessages: n, summaryKeep: n,
+            stickyKeep: Number(overrides.stickyKeep || $('stickyKeep').value || 20),
+            summaryEvery: Number(overrides.summaryEvery || $('summaryEvery').value || 10),
+            factsMax: Number(overrides.factsMax || $('factsMax').value || 50), factsConsolidate: 0,
+            maxToolCalls: Number(overrides.maxToolCalls || $('maxToolCalls').value || 5),
+            planning: overrides.planning ?? $('planning').checked,
+            tools: overrides.tools ?? $('tools').checked,
+            stickyFacts: overrides.stickyFacts ?? $('stickyFacts').checked
+        };
+    }
+    function saveSettings() {
+        const data = {mainModel:$('mainModel').value, analysisModel:$('analysisModel').value, compression:$('compression').value,
+            windowSize:$('windowSize').value, summaryEvery:$('summaryEvery').value, stickyKeep:$('stickyKeep').value, factsMax:$('factsMax').value,
+            maxToolCalls:$('maxToolCalls').value, planning:$('planning').checked, tools:$('tools').checked,
+            stickyFacts:$('stickyFacts').checked};
+        localStorage.setItem('agentV2Settings', JSON.stringify(data));
+        updateCompressionUi();
+        if (!busy) logAction('settings_change', {compression:data.compression, stickyFacts:data.stickyFacts, mainModel:data.mainModel, analysisModel:data.analysisModel});
+    }
+    function updateCompressionUi() {
+        const mode = $('compression').value;
+        $('windowSize').disabled = busy || mode === 'none';
+        $('summaryEvery').disabled = busy || mode !== 'summary';
+        $('stickyKeep').disabled = busy || mode === 'summary' || !$('stickyFacts').checked;
+        $('factsMax').disabled = busy || !$('stickyFacts').checked;
+        $('windowLabel').textContent = mode === 'sliding' ? 'N последних записей' : mode === 'summary' ? 'N сообщений без сжатия' : 'N сообщений';
+    }
+    function setBusy(value, chatRunning = false) {
+        busy = value;
+        $('settingsFieldset').disabled = value;
+        for (const id of ['input','send','scriptFile','runScript','analyzeDialog','analyzeScript','newTask','resetAll']) $(id).disabled = value || (id === 'runScript' && !scriptData) || (id === 'analyzeScript' && !scriptDialogIds.length);
+        $('pauseBtn').classList.toggle('hidden', !(value && chatRunning && sessionId));
+        $('abortBtn').classList.toggle('hidden', !(value && chatRunning && sessionId));
+        $('typing').classList.toggle('hidden', !value);
+        if (!value) { paused = false; $('pauseBtn').textContent = 'Пауза'; $('typingText').textContent = 'Агент работает…'; }
+        updateCompressionUi();
+    }
+
+    async function executeTurn(text, overrides = {}) {
+        if (!text.trim()) return null;
+        if (!scriptActive) setBusy(true, true);
+        abortRequested = false;
+        addMessage(text, 'user');
+        let answerEl = null;
+        let answerText = '';
+        let reasoningEl = null;
+        let reasoningChars = 0;
+        let doneData = null;
+        const closeReasoning = () => {
+            if (!reasoningEl) return;
+            reasoningEl.open = false;
+            if (!reasoningEl.querySelector('pre').textContent) {
+                reasoningEl.remove();
+                reasoningEl = null;
+            }
+        };
+        try {
+            const response = await fetch('/api/v2/agent/chat', {method:'POST', headers:{'Content-Type':'application/json'},
+                body:JSON.stringify({...settingsPayload(overrides), message:text, sessionId:overrides.sessionId || sessionId || ''})});
+            if (!response.ok || !response.body) {
+                const err = await response.text(); throw new Error(err || ('HTTP ' + response.status));
+            }
+            const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = '';
+            while (true) {
+                const {value, done} = await reader.read(); if (done) break;
+                buffer += decoder.decode(value, {stream:true});
+                let boundary;
+                while ((boundary = buffer.indexOf('\n\n')) >= 0) {
+                    const frame = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 2);
+                    const event = (frame.match(/^event:\s*(.+)$/m) || [])[1];
+                    const raw = (frame.match(/^data:\s*(.*)$/m) || [])[1];
+                    if (!event || raw == null) continue;
+                    let data; try { data = JSON.parse(raw); } catch { data = {}; }
+                    if (event === 'session') {
+                        sessionId = data.id;
+                        if (busy) {
+                            $('pauseBtn').classList.remove('hidden');
+                            $('abortBtn').classList.remove('hidden');
+                        }
+                    }
+                    else if (event === 'token') {
+                        answerText += data.text || '';
+                        if (answerText.trim()) {
+                            $('typingText').textContent = 'Агент отвечает…';
+                            if (!answerEl) answerEl = addMessage('', 'assistant');
+                            renderAssistantMarkdown(answerEl, answerText); scrollChat();
+                        }
+                    } else if (event === 'reasoning') {
+                        const text = data.text || '';
+                        if (!text) continue;
+                        $('typingText').textContent = 'Агент размышляет…';
+                        if (!reasoningEl) {
+                            reasoningEl = addEventBlock('🧠 Размышления', '');
+                            reasoningEl.classList.add('reasoning-block'); reasoningEl.open = true;
+                        }
+                        reasoningEl.querySelector('pre').textContent += text;
+                        reasoningChars += text.length;
+                        reasoningEl.querySelector('summary').textContent = '🧠 Размышления · ' + reasoningChars + ' симв.';
+                        scrollChat();
+                    } else if (event === 'planning') $('typingText').textContent = 'Составление плана…';
+                    else if (event === 'llm_call') {
+                        try {
+                            const log = await loadLlmCall(data.id);
+                            if (log) renderLlmCall(log);
+                            else addEventBlock('Запись LLM недоступна', {id:data.id});
+                        } catch (error) { addEventBlock('Не удалось загрузить запись LLM', error.message); }
+                    }
+                    else if (event === 'plan') {
+                        $('typingText').textContent = 'Выполнение плана…';
+                        if (!attachPlanToLlm(data.steps)) addPlan(data.steps);
+                    }
+                    else if (event === 'tool_call') addEventBlock('Вызов: ' + data.tool, data.args);
+                    else if (event === 'tool_result') addEventBlock((data.ok ? 'Результат: ' : 'Ошибка: ') + data.tool, data.text);
+                    else if (event === 'permission_request') addPermission(data);
+                    else if (event === 'limit_confirm') addDecision(data.requestId, 'Достигнут лимит вызовов инструментов (' + data.max + '). Продолжить выполнение?', 'Продолжить', 'Остановить');
+                    else if (event === 'permission_resolved') resolveDecision(data);
+                    else if (event === 'paused') { paused = true; $('pauseBtn').textContent = 'Продолжить'; $('typingText').textContent = 'Пауза между шагами'; }
+                    else if (event === 'resumed') { paused = false; $('pauseBtn').textContent = 'Пауза'; $('typingText').textContent = 'Агент работает…'; }
+                    else if (event === 'memory') { currentMemory = data; renderMemory(data); }
+                    else if (event === 'working') { currentMemory.working = data; }
+                    else if (event === 'facts') { currentMemory.facts = data.facts || []; renderMemory(currentMemory); }
+                    else if (event === 'note') addMessage(data.text, 'note');
+                    else if (event === 'reply_error') addEventBlock('Повреждённый вызов инструмента', data.text);
+                    else if (event === 'reply') {
+                        const text = data.text || '';
+                        if (text.trim()) {
+                            answerText = text; if (!answerEl) answerEl = addMessage('', 'assistant');
+                            renderAssistantMarkdown(answerEl, answerText);
+                        }
+                    }
+                    else if (event === 'error') { setStatus(data.error, true); addMessage(data.error, 'error'); }
+                    else if (event === 'done') { doneData = data; closeReasoning(); renderTurn(data, answerEl); }
+                }
+            }
+            return {done:doneData, memory:currentMemory, sessionId};
+        } catch (e) {
+            setStatus(e.message, true); addMessage('Ошибка запроса: ' + e.message, 'error'); return null;
+        } finally {
+            closeReasoning();
+            if (!scriptActive) {
+                setBusy(false); await Promise.all([refreshMemory(), refreshLlmLog(), refreshActionLog()]);
+            }
+        }
+    }
+
+    function emptyDialogStats() {
+        return {turns:0, hasUsage:false, promptTokens:0, completionTokens:0, totalTokens:0,
+            llmCalls:0, toolCalls:0, durationMs:0, abortedTurns:0};
+    }
+    function accumulateDialogStats(done) {
+        const stats = done.stats || {};
+        dialogStats.turns++;
+        for (const key of ['promptTokens','completionTokens','totalTokens','llmCalls','toolCalls']) {
+            if (Number.isFinite(stats[key])) dialogStats[key] += stats[key];
+        }
+        if (['promptTokens','completionTokens','totalTokens'].some(key => Number.isFinite(stats[key]))) {
+            dialogStats.hasUsage = true;
+        }
+        if (Number.isFinite(done.durationMs)) dialogStats.durationMs += done.durationMs;
+        if (done.aborted) dialogStats.abortedTurns++;
+    }
+    function renderDialogStats() {
+        if (!dialogStats.turns) { $('turnChips').innerHTML = ''; return; }
+        const chips = [];
+        if (dialogStats.hasUsage) {
+            chips.push('Общий вход: ' + dialogStats.promptTokens,
+                'Общий выход: ' + dialogStats.completionTokens,
+                'Общий итог: ' + dialogStats.totalTokens);
+        }
+        chips.push('LLM всего: ' + dialogStats.llmCalls,
+            'Инструменты всего: ' + dialogStats.toolCalls,
+            'Время всего: ' + (dialogStats.durationMs / 1000).toFixed(1) + ' с');
+        if (dialogStats.abortedTurns) chips.push('Прервано ходов: ' + dialogStats.abortedTurns);
+        $('turnChips').innerHTML = chips.map(x => '<span class="chip">' + escapeHtml(x) + '</span>').join('');
+    }
+
+    function turnChips(done) {
+        const stats = done.stats || {}; const chips = [];
+        if (stats.promptTokens != null) chips.push('Вход: ' + stats.promptTokens);
+        if (stats.completionTokens != null) chips.push('Выход: ' + stats.completionTokens);
+        if (stats.totalTokens != null) chips.push('Всего: ' + stats.totalTokens);
+        if (stats.llmCalls != null) chips.push('LLM: ' + stats.llmCalls);
+        if (stats.toolCalls != null) chips.push('Инструменты: ' + stats.toolCalls);
+        if (done.durationMs != null) chips.push((done.durationMs / 1000).toFixed(1) + ' с');
+        if (done.aborted) chips.push('Прервано');
+        return chips;
+    }
+    function renderTurn(done, answerEl = null, updateMain = true) {
+        accumulateDialogStats(done);
+        if (updateMain) renderDialogStats();
+        if (answerEl) {
+            const html = turnChips(done).map(x => '<span class="chip">' + escapeHtml(x) + '</span>').join('');
+            let statsEl = answerEl.nextElementSibling;
+            if (!statsEl?.classList.contains('answer-stats')) {
+                statsEl = document.createElement('div');
+                statsEl.className = 'answer-stats chips';
+                answerEl.insertAdjacentElement('afterend', statsEl);
+            }
+            statsEl.innerHTML = html;
+            scrollChat();
+        }
+    }
+
+    function releaseScriptPause() {
+        const resume = scriptPauseResume;
+        scriptPauseResume = null;
+        if (resume) resume();
+    }
+    async function waitForScriptResume() {
+        if (!scriptActive || !scriptPauseRequested || abortRequested) return;
+        paused = true;
+        $('pauseBtn').textContent = 'Продолжить';
+        $('typingText').textContent = 'Скрипт на паузе';
+        await new Promise(resolve => { scriptPauseResume = resolve; });
+    }
+
+    async function control(action) {
+        if (!sessionId) return;
+        const response = await fetch('/api/v2/agent/control', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({sessionId, action})});
+        if (!response.ok) { setStatus(await response.text(), true); return; }
+        if (action === 'pause') {
+            if (scriptActive) scriptPauseRequested = true;
+            paused = true;
+            $('pauseBtn').textContent = 'Продолжить';
+            $('typingText').textContent = scriptActive ? 'Пауза после текущего сообщения…' : 'Пауза после текущего шага…';
+        } else if (action === 'resume') {
+            scriptPauseRequested = false;
+            paused = false;
+            $('pauseBtn').textContent = 'Пауза';
+            $('typingText').textContent = 'Агент работает…';
+            releaseScriptPause();
+        } else if (action === 'abort') {
+            abortRequested = true;
+            scriptPauseRequested = false;
+            releaseScriptPause();
+        }
+    }
+
+    async function refreshMemory() {
+        const query = sessionId ? '?dialog=' + encodeURIComponent(sessionId) : '';
+        const response = await fetch('/api/v2/agent/memory' + query);
+        if (!response.ok) return;
+        const data = await response.json(); currentMemory = data.memory || {}; renderMemory(currentMemory);
+    }
+    function renderMemory(memory) {
+        $('systemPrompt').textContent = memory.systemPrompt || '';
+        const layers = memory.layers || {};
+        const names = {shortTerm:'ST', working:'WT', longTerm:'LT', system:'System', user:'User'};
+        $('layerChips').innerHTML = Object.entries(names).map(([key,label]) => {
+            const n = layers[key]?.estTokens || 0; return '<span class="chip">' + label + ' ~' + n + ' t</span>';
+        }).join('') + '<span class="chip">Всего ~' + (layers.totalEstTokens || 0) + ' t</span>';
+        const factsEnabled = memory.stickyFacts ?? $('stickyFacts').checked;
+        const compression = memory.compression || $('compression').value;
+        const modeLabels = {none:'Без сжатия', lastN:'Последние N', sliding:'Sliding Window', summary:'Summary + N'};
+        $('stMeta').innerHTML = [
+            'Режим: ' + (modeLabels[compression] || compression),
+            'Записей: ' + (memory.historyMessages || 0),
+            'Автофакты: ' + (factsEnabled ? 'вкл.' : 'выкл.')
+        ].map(x => '<span class="chip">' + escapeHtml(x) + '</span>').join('');
+        $('summaryText').textContent = memory.summary || 'Сводка пока пуста.';
+        $('summaryText').classList.toggle('empty-text', !memory.summary);
+        renderFactsEditor(memory.facts || []);
+        $('workingEditor').value = JSON.stringify(memory.working || {}, null, 2);
+        renderRuleCandidates(memory.ruleCandidates || []);
+        renderRules(memory.longTerm?.rules || []);
+        $('ltEditor').value = JSON.stringify(memory.longTerm || {rules:[]}, null, 2);
+    }
+    function factsFromEditor() {
+        return ($('factsList')._facts || []).map(f => ({...f}));
+    }
+    function syncFactsFromEditor() {
+        const facts = factsFromEditor();
+        $('factsEditor').value = JSON.stringify({facts}, null, 2);
+        $('factsCount').textContent = facts.length;
+    }
+    function factCategory(category) {
+        const types = {
+            goal:['🎯', 'Цель'], constraint:['⚠️', 'Ограничение'],
+            preference:['♥', 'Предпочтение'], decision:['✅', 'Решение'],
+            fact:['📌', 'Факт']
+        };
+        return types[category] || ['❔', 'Другая категория: ' + category];
+    }
+    function renderFactsEditor(facts) {
+        const list = $('factsList');
+        list._facts = facts.map(f => ({category:String(f.category || 'fact'), key:String(f.key || ''), value:String(f.value || '')}));
+        list.innerHTML = '';
+        if (!list._facts.length) list.innerHTML = '<span class="status facts-empty">Фактов пока нет. Добавьте вручную или включите автофакты.</span>';
+        list._facts.forEach((fact, index) => {
+            const [icon, label] = factCategory(fact.category);
+            const row = document.createElement('div'); row.className = 'fact-row'; row.title = 'Двойной клик — изменить факт';
+            row.innerHTML = '<span class="fact-type" title="' + escapeHtml(label) + '" aria-label="' + escapeHtml(label) + '">' + icon + '</span>'
+                + '<span class="fact-key" title="' + escapeHtml(fact.key) + '">' + escapeHtml(fact.key) + '</span>'
+                + '<span class="fact-value" title="' + escapeHtml(fact.value) + '">' + escapeHtml(fact.value) + '</span>'
+                + '<button class="btn small danger delete-fact" type="button" title="Удалить факт" aria-label="Удалить факт">×</button>';
+            row.ondblclick = () => startFactEdit(index);
+            row.querySelector('.delete-fact').onclick = async () => {
+                list._facts.splice(index, 1); renderFactsEditor(list._facts);
+                setStatus('Сохранение фактов…'); await saveLayer('st', {facts:factsFromEditor()});
+            };
+            list.appendChild(row);
+        });
+        syncFactsFromEditor();
+    }
+    function startFactEdit(index) {
+        const list = $('factsList');
+        if (list.querySelector('.fact-row.editing')) return;
+        const fact = list._facts[index]; if (!fact) return;
+        const row = list.querySelectorAll('.fact-row')[index];
+        const categories = ['fact', 'goal', 'constraint', 'preference', 'decision'];
+        if (!categories.includes(fact.category)) categories.push(fact.category);
+        row.classList.add('editing'); row.removeAttribute('title');
+        row.innerHTML = '<select class="fact-category" aria-label="Категория факта">' + categories.map(category => {
+            const [icon, label] = factCategory(category);
+            return '<option value="' + escapeHtml(category) + '"' + (category === fact.category ? ' selected' : '') + '>' + icon + ' ' + escapeHtml(label) + '</option>';
+        }).join('') + '</select>'
+            + '<input class="fact-key-input" aria-label="Ключ факта" value="' + escapeHtml(fact.key) + '" placeholder="Ключ">'
+            + '<input class="fact-value-input" aria-label="Значение факта" value="' + escapeHtml(fact.value) + '" placeholder="Значение">';
+        row.onkeydown = async event => {
+            if (event.key === 'Enter') { event.preventDefault(); await commitFactEdit(row, index); }
+            if (event.key === 'Escape') {
+                if (!fact.key && !fact.value) list._facts.splice(index, 1);
+                renderFactsEditor(list._facts);
+            }
+        };
+        row.onfocusout = () => setTimeout(() => {
+            if (row.isConnected && !row.contains(document.activeElement)) commitFactEdit(row, index);
+        }, 0);
+        row.querySelector('.fact-key-input').focus();
+    }
+    async function commitFactEdit(row, index) {
+        if (row.dataset.saving) return;
+        const fact = {
+            category:row.querySelector('.fact-category').value,
+            key:row.querySelector('.fact-key-input').value.trim(),
+            value:row.querySelector('.fact-value-input').value.trim()
+        };
+        if (!fact.key || !fact.value) {
+            setStatus('Для сохранения заполните ключ и значение. Esc — отмена.', true); return;
+        }
+        row.dataset.saving = 'true'; $('factsList')._facts[index] = fact; syncFactsFromEditor();
+        setStatus('Сохранение фактов…'); await saveLayer('st', {facts:factsFromEditor()});
+        row.dataset.saving = '';
+    }
+    function renderRuleCandidates(candidates) {
+        const container = $('ruleCandidates'); container.innerHTML = '';
+        candidates.forEach(candidate => {
+            const el = document.createElement('div'); el.className = 'rule-candidate';
+            const title = candidate.origin === 'bootstrap' ? 'Первичная настройка агента'
+                : 'Предложение в LT · замечено ' + candidate.occurrences + ' раза';
+            const hint = title + (candidate.operation === 'update' ? '\nБыло: ' + candidate.baseText : '')
+                + '\nДвойной клик для редактирования';
+            el.innerHTML = '<span title="' + escapeHtml(title) + '">＋</span>'
+                + '<span class="candidate-text" title="' + escapeHtml(hint) + '">' + escapeHtml(candidate.text) + '</span>'
+                + '<div class="row-actions"><button class="btn small approve" type="button" title="Добавить или применить">✓</button>'
+                + '<button class="btn small reject" type="button" title="Отклонить">×</button></div>';
+            el.querySelector('.candidate-text').ondblclick = () => {
+                if (el.querySelector('textarea')) return;
+                const text = el.querySelector('.candidate-text');
+                const editor = document.createElement('textarea'); editor.value = candidate.text; editor.setAttribute('aria-label', 'Текст предлагаемого правила');
+                text.replaceWith(editor); editor.focus();
+                editor.oninput = () => candidate.text = editor.value;
+                editor.onkeydown = event => { if (event.key === 'Escape') { candidate.text = editor.value; renderRuleCandidates(currentMemory.ruleCandidates || []); } };
+            };
+            const resolve = async action => {
+                el.querySelectorAll('button,textarea').forEach(control => control.disabled = true);
+                try {
+                    const response = await fetch('/api/v2/agent/rule-candidate', {method:'POST', headers:{'Content-Type':'application/json'},
+                        body:JSON.stringify({id:candidate.id, action, text:candidate.text.trim()})});
+                    const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Ошибка сохранения');
+                    currentMemory = data.memory; renderMemory(currentMemory);
+                    setStatus(action === 'approve' ? 'Правило добавлено в Long-term.' : 'Предложение отклонено.'); refreshActionLog();
+                } catch (error) {
+                    el.querySelectorAll('button,textarea').forEach(control => control.disabled = false);
+                    setStatus(error.message, true);
+                }
+            };
+            el.querySelector('.approve').onclick = () => resolve('approve');
+            el.querySelector('.reject').onclick = () => resolve('reject');
+            container.appendChild(el);
+        });
+    }
+    function renderRules(rules) {
+        const list = $('rulesList'); list.innerHTML = '';
+        if (!rules.length) list.innerHTML = '<span class="status facts-empty">Правил нет.</span>';
+        const icons = {role:'◉', behavior:'◈', output_format:'▤', tool_policy:'⚒', constraint:'⊘', preference:'♡', custom:'•'};
+        rules.forEach((rule, index) => {
+            const el = document.createElement('div'); el.className = 'rule' + (rule.enabled === false ? ' disabled' : '');
+            el.dataset.index = index; el._rule = {...rule};
+            el.innerHTML = '<span class="rule-type-icon" role="button" tabindex="0" title="' + escapeHtml(rule.type || 'custom') + ' · клик: вкл./выкл.">'
+                + (icons[rule.type] || '•') + '</span><span class="rule-text" title="' + escapeHtml(rule.text || '') + ' — двойной клик для редактирования">'
+                + escapeHtml(rule.text || '') + '</span><button class="btn small danger delete-rule" type="button" title="Удалить">×</button>';
+            const toggle = async () => {
+                el._rule.enabled = el._rule.enabled === false;
+                await saveLayer('lt', {rules:rulesFromEditor()});
+            };
+            el.querySelector('.rule-type-icon').onclick = toggle;
+            el.querySelector('.rule-type-icon').onkeydown = event => { if (event.key === 'Enter') toggle(); };
+            el.querySelector('.delete-rule').onclick = async () => {
+                el.remove(); await saveLayer('lt', {rules:rulesFromEditor()});
+            };
+            el.querySelector('.rule-text').ondblclick = () => editRule(el);
+            list.appendChild(el);
+        });
+    }
+    function editRule(el) {
+        if (el.classList.contains('editing')) return;
+        const rule = el._rule; el.classList.add('editing');
+        el.innerHTML = '<select class="rule-type" aria-label="Тип правила">'
+            + ['role','behavior','output_format','tool_policy','constraint','preference','custom'].map(t => '<option value="' + t + '"' + (t === rule.type ? ' selected' : '') + '>' + t + '</option>').join('')
+            + '</select><textarea class="rule-editor" aria-label="Текст правила" placeholder="Текст инструкции">' + escapeHtml(rule.text || '') + '</textarea>';
+        const textarea = el.querySelector('textarea'); textarea.focus(); textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+        let finished = false;
+        const finish = async save => {
+            if (finished) return; finished = true;
+            if (save) {
+                el._rule.type = el.querySelector('.rule-type').value;
+                el._rule.text = textarea.value.trim();
+                if (!el._rule.text) { finished = false; setStatus('Текст правила не должен быть пустым. Esc — отмена.', true); textarea.focus(); return; }
+                await saveLayer('lt', {rules:rulesFromEditor()});
+            } else renderRules(currentMemory.longTerm?.rules || []);
+        };
+        textarea.onblur = () => finish(true);
+        textarea.onkeydown = event => {
+            if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); finish(true); }
+            if (event.key === 'Escape') { event.preventDefault(); finish(false); }
+        };
+        el.querySelector('select').onchange = syncLtEditorFromRules;
+        textarea.oninput = syncLtEditorFromRules;
+    }
+    function rulesFromEditor() {
+        return [...$('rulesList').querySelectorAll('.rule')].map(el => ({...(el._rule || {}),
+            type:el.querySelector('.rule-type')?.value || el._rule.type,
+            text:(el.querySelector('.rule-editor')?.value ?? el._rule.text ?? '').trim()}));
+    }
+    function syncLtEditorFromRules() { $('ltEditor').value = JSON.stringify({rules:rulesFromEditor()}, null, 2); }
+    async function saveLayer(layer, payload) {
+        if (!sessionId && layer !== 'lt') { setStatus('Сначала создайте задачу.', true); return false; }
+        const query = '?layer=' + layer + (sessionId ? '&dialog=' + encodeURIComponent(sessionId) : '');
+        try {
+            const response = await fetch('/api/v2/agent/memory' + query, {method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+            const data = await response.json(); if (!response.ok) { setStatus(data.error, true); return false; }
+            currentMemory = data.memory; renderMemory(currentMemory); setStatus(layer === 'st' ? 'Факты сохранены.' : 'Слой ' + layer.toUpperCase() + ' сохранён.'); refreshActionLog();
+            return true;
+        } catch (error) {
+            setStatus('Не удалось сохранить: ' + error.message, true); return false;
+        }
+    }
+    async function clearLayer(layer) {
+        if (!confirm('Очистить слой ' + layer.toUpperCase() + '?')) return;
+        const query = '?layer=' + layer + (sessionId ? '&dialog=' + encodeURIComponent(sessionId) : '');
+        const response = await fetch('/api/v2/agent/memory' + query, {method:'DELETE'});
+        const data = await response.json(); if (!response.ok) { setStatus(data.error, true); return; }
+        currentMemory = data.memory; renderMemory(currentMemory); setStatus('Слой ' + layer.toUpperCase() + ' очищен.'); refreshActionLog();
+    }
+
+    async function loadLlmCall(id) {
+        const response = await fetch('/api/v2/agent/llmlog?dialog=' + encodeURIComponent(sessionId));
+        if (!response.ok) throw new Error('Не удалось загрузить запись LLM #' + id);
+        const data = await response.json();
+        return (data.items || []).find(item => item.id === id) || null;
+    }
+    async function refreshLlmLog() {
+        const query = sessionId ? '?dialog=' + encodeURIComponent(sessionId) : '';
+        const response = await fetch('/api/v2/agent/llmlog' + query); if (!response.ok) return;
+        const data = await response.json(); const items = data.items || [];
+        $('llmLog').innerHTML = items.length ? items.map(item => {
+            const reasoning = item.reasoning ? '\n\nREASONING\n' + escapeHtml(item.reasoning) : '';
+            return '<details class="log-item"><summary>#' + item.id + ' · ' + escapeHtml(item.kind) + ' · ' + escapeHtml(item.createdAt) + '</summary><pre>REQUEST\n' + escapeHtml(JSON.stringify(item.request, null, 2)) + reasoning + '\n\nRESPONSE\n' + escapeHtml(item.response) + '\n\nLAYERS\n' + escapeHtml(JSON.stringify(item.layers, null, 2)) + '\n\nUSAGE\n' + escapeHtml(JSON.stringify(item.usage, null, 2)) + '</pre></details>';
+        }).join('') : '<span class="status">Запросов пока нет.</span>';
+    }
+    async function refreshActionLog() {
+        const query = sessionId ? '?dialog=' + encodeURIComponent(sessionId) : '';
+        const response = await fetch('/api/v2/agent/actionlog' + query); if (!response.ok) return;
+        const data = await response.json(); const items = data.items || [];
+        $('actionLog').innerHTML = items.length ? items.map(item => '<details class="log-item"><summary>#' + item.id + ' · ' + escapeHtml(item.action) + ' · ' + escapeHtml(item.createdAt) + '</summary><pre>' + escapeHtml(JSON.stringify(item.details, null, 2)) + '</pre></details>').join('') : '<span class="status">Действий пока нет.</span>';
+    }
+    async function logAction(action, details = {}) {
+        if (!sessionId) return;
+        fetch('/api/v2/agent/action', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({sessionId, action, details})}).catch(() => {});
+    }
+
+    async function restoreHistory() {
+        const response = await fetch('/api/v2/agent/history'); const data = await response.json();
+        sessionId = data.sessionId; chatEl.innerHTML = '';
+        let logsById = new Map();
+        if (sessionId) {
+            try {
+                const logResponse = await fetch('/api/v2/agent/llmlog?dialog=' + encodeURIComponent(sessionId));
+                if (logResponse.ok) {
+                    const logData = await logResponse.json();
+                    logsById = new Map((logData.items || []).map(item => [item.id, item]));
+                }
+            } catch { /* The transcript remains available even if detailed logs cannot be loaded. */ }
+        }
+        dialogStats = emptyDialogStats();
+        let lastAnswerEl = null;
+        for (const entry of data.entries || []) {
+            const p = entry.payload || {};
+            if (entry.kind === 'assistant') lastAnswerEl = String(p.text || '').trim() ? addAssistantMessage(p.text) : null;
+            else if (entry.kind === 'user') { addMessage(p.text || '', 'user'); lastAnswerEl = null; }
+            else if (entry.kind === 'note') addMessage(p.text || '', 'note');
+            else if (entry.kind === 'prose') lastAnswerEl = String(p.text || '').trim() ? addAssistantMessage(p.text) : null;
+            else if (entry.kind === 'tool') addEventBlock('Инструмент: ' + p.tool, p);
+            else if (entry.kind === 'llmref') {
+                const log = logsById.get(p.logId);
+                if (log?.kind === 'chat' && log.reasoning) {
+                    const reasoningEl = addEventBlock('🧠 Размышления · ' + log.reasoning.length + ' симв.', log.reasoning);
+                    reasoningEl.classList.add('reasoning-block'); reasoningEl.open = false;
+                    if (lastAnswerEl) chatEl.insertBefore(reasoningEl, lastAnswerEl);
+                }
+                renderLlmCall(log);
+            }
+            else if (entry.kind === 'plan') { if (!attachPlanToLlm(p.steps)) addPlan(p.steps); }
+            else if (entry.kind === 'permission') addEventBlock('Разрешение: ' + p.action, p);
+            else if (entry.kind === 'reply_error') addEventBlock('Ошибка протокола', p.text);
+            else if (entry.kind === 'turnstats') renderTurn(p, lastAnswerEl, false);
+        }
+        if (!chatEl.children.length) chatEl.innerHTML = '<div class="empty">Начните диалог. Состав памяти и фактические запросы к модели видны в панели справа.</div>';
+        currentMemory = data.memory || {}; renderMemory(currentMemory);
+        renderDialogStats();
+        await Promise.all([refreshLlmLog(), refreshActionLog()]);
+    }
+
+    async function runScript() {
+        if (!scriptData?.dialogs?.length || busy) return;
+        scriptActive = true; abortRequested = false; scriptPauseRequested = false;
+        setBusy(true, true); scriptDialogIds = []; lastScriptResults = [];
+        $('scriptResults').style.display = 'none';
+        const originSession = sessionId;
+        addMessage('Запуск скрипта: ' + scriptData.dialogs.length + ' диалог(ов)', 'note');
+        try {
+            for (const dialog of scriptData.dialogs) {
+                if (abortRequested) break;
+                // Keep the existing transcript and append every script dialog to it.
+                sessionId = null; paused = false;
+                $('pauseBtn').classList.add('hidden'); $('abortBtn').classList.add('hidden');
+                $('pauseBtn').textContent = 'Пауза';
+                addMessage('Скрипт: ' + (dialog.name || 'Диалог'), 'note');
+                const overrides = {...(dialog.settings || {}), sessionId:null};
+                if (dialog.settings?.contextMessages || dialog.settings?.slidingMessages || dialog.settings?.stickyKeep || dialog.settings?.summaryKeep) {
+                    overrides.windowSize = dialog.settings.contextMessages || dialog.settings.slidingMessages || dialog.settings.stickyKeep || dialog.settings.summaryKeep;
+                }
+                let last = null;
+                const stats = {};
+                for (const message of dialog.messages || []) {
+                    if (abortRequested) break;
+                    $('typingText').textContent = (dialog.name || 'Диалог') + ' · ' + ((dialog.messages || []).indexOf(message) + 1) + '/' + (dialog.messages || []).length;
+                    last = await executeTurn(message, overrides);
+                    overrides.sessionId = sessionId;
+                    // A script-level pause also works when the turn has no tool steps.
+                    await waitForScriptResume();
+                    if (!last?.done || last.done.aborted) { abortRequested = true; break; }
+                    for (const [key, value] of Object.entries(last.done.stats || {})) {
+                        if (typeof value === 'number') stats[key] = (stats[key] || 0) + value;
+                    }
+                }
+                if (sessionId) scriptDialogIds.push(sessionId);
+                const layers = last?.memory?.layers || {};
+                const facts = last?.memory?.facts || [];
+                lastScriptResults.push({name:dialog.name || 'Диалог', sessionId, stats, layers, facts});
+            }
+        } finally {
+            // Do not clear or replace the visible script transcript after completion.
+            scriptActive = false; scriptPauseRequested = false; releaseScriptPause();
+            if (!sessionId) sessionId = originSession;
+            setBusy(false); renderScriptResults();
+            if (sessionId) await Promise.all([refreshMemory(), refreshLlmLog(), refreshActionLog()]);
+        }
+    }
+    function renderScriptResults() {
+        const el = $('scriptResults');
+        if (!lastScriptResults.length) { el.style.display = 'none'; return; }
+        el.innerHTML = '<strong>Сравнение диалогов скрипта</strong><table><thead><tr><th>Диалог</th><th>Токены</th><th>LLM</th><th>ST</th><th>WT</th><th>LT</th><th>Факты</th></tr></thead><tbody>'
+            + lastScriptResults.map(r => '<tr><td>' + escapeHtml(r.name) + '</td><td>' + (r.stats.totalTokens ?? '—') + '</td><td>' + (r.stats.llmCalls ?? '—') + '</td><td>' + (r.layers.shortTerm?.estTokens ?? 0) + '</td><td>' + (r.layers.working?.estTokens ?? 0) + '</td><td>' + (r.layers.longTerm?.estTokens ?? 0) + '</td><td>' + r.facts.length + '</td></tr>').join('') + '</tbody></table>';
+        el.style.display = 'block'; $('analyzeScript').disabled = !scriptDialogIds.length;
+    }
+
+    function normalizeAnalysisText(text) {
+        return String(text || '').replace(/[\t ]*\n[\t ]*,[\t ]*\n/g, ', ');
+    }
+    async function saveAnalysisMarkdown(reply, model, scope) {
+        const content = '# Анализ ' + (scope === 'script' ? 'скрипта' : 'диалога') + '\n\n'
+            + 'Модель: ' + model + '\nДата: ' + new Date().toLocaleString('ru-RU') + '\n\n' + reply + '\n';
+        const filename = 'analysis-' + new Date().toISOString().replace(/[:.]/g, '-') + '.md';
+        try {
+            if (window.showSaveFilePicker) {
+                const handle = await window.showSaveFilePicker({suggestedName:filename,
+                    types:[{description:'Markdown', accept:{'text/markdown':['.md']}}]});
+                const writable = await handle.createWritable(); await writable.write(content); await writable.close();
+            } else {
+                const url = URL.createObjectURL(new Blob([content], {type:'text/markdown;charset=utf-8'}));
+                const link = document.createElement('a'); link.href = url; link.download = filename; link.click();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+            }
+            setStatus('Анализ сохранён в Markdown.'); logAction('analysis_saved', {filename, scope});
+        } catch (error) {
+            if (error.name !== 'AbortError') setStatus('Не удалось сохранить анализ: ' + error.message, true);
+        }
+    }
+    async function analyze(scope) {
+        if (busy || (scope === 'dialog' && !sessionId) || (scope === 'script' && !scriptDialogIds.length)) return;
+        setBusy(true, false); $('typingText').textContent = 'Анализ моделью ' + $('analysisModel').value + '…';
+        try {
+            const response = await fetch('/api/v2/agent/analyze', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({dialogId:sessionId, dialogIds:scope === 'script' ? scriptDialogIds : undefined, model:$('analysisModel').value, scope})});
+            const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Analysis failed');
+            const reply = normalizeAnalysisText(data.reply);
+            const el = addMessage('', 'analysis assistant md');
+            el.innerHTML = '<strong>Анализ ' + (scope === 'script' ? 'скрипта' : 'диалога') + ' · ' + escapeHtml(data.model) + '</strong><div class="analysis-content"></div>'
+                + '<button class="btn small analysis-save" type="button">Сохранить MD</button>';
+            el.querySelector('.analysis-content').innerHTML = renderMarkdown(reply);
+            el.querySelector('.analysis-save').onclick = () => saveAnalysisMarkdown(reply, data.model, scope);
+            await Promise.all([refreshLlmLog(), refreshActionLog()]);
+        } catch (e) { setStatus(e.message, true); addMessage('Анализ не выполнен: ' + e.message, 'error'); }
+        finally { setBusy(false); }
+    }
+
+    $('send').onclick = () => { const text = $('input').value.trim(); if (text && !busy) { $('input').value = ''; executeTurn(text); } };
+    $('input').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('send').click(); } });
+    $('pauseBtn').onclick = () => control(paused ? 'resume' : 'pause');
+    $('abortBtn').onclick = () => control('abort');
+    $('newTask').onclick = async () => {
+        const response = await fetch('/api/v2/agent/dialog/new', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+        const data = await response.json(); sessionId = data.sessionId; chatEl.innerHTML = '<div class="empty">Новая задача. Short-term и working очищены, конфиг агента сохранён.</div>';
+        dialogStats = emptyDialogStats(); renderDialogStats();
+        currentMemory = data.memory; renderMemory(currentMemory); scriptDialogIds = []; lastScriptResults = []; renderScriptResults();
+    };
+    $('resetAll').onclick = async () => {
+        if (!confirm('Сбросить ST/WT всех диалогов и глобальный LT? Транскрипты и журналы сохранятся.')) return;
+        const response = await fetch('/api/v2/agent/reset', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({confirm:true})});
+        if (response.ok) { await refreshMemory(); setStatus('Все слои памяти очищены.'); } else setStatus(await response.text(), true);
+    };
+    $('addFact').onclick = () => {
+        if ($('factsList').querySelector('.fact-row.editing')) { setStatus('Сначала завершите редактирование текущего факта.', true); return; }
+        const facts = [...factsFromEditor(), {category:'fact', key:'', value:''}];
+        renderFactsEditor(facts); startFactEdit(facts.length - 1);
+    };
+    $('clearFacts').onclick = async () => {
+        if (!factsFromEditor().length) return;
+        if (!confirm('Удалить все sticky-факты? История диалога и сводка сохранятся.')) return;
+        renderFactsEditor([]); setStatus('Сохранение фактов…'); await saveLayer('st', {facts:[]});
+    };
+    $('applyStJson').onclick = async () => {
+        try {
+            const data = JSON.parse($('factsEditor').value);
+            if (!Array.isArray(data.facts) || data.facts.some(f => !f || !String(f.key || '').trim() || !String(f.value || '').trim())) throw new Error();
+            renderFactsEditor(data.facts);
+            setStatus('Сохранение фактов…'); await saveLayer('st', {facts:factsFromEditor()});
+        } catch {
+            setStatus('Нужен JSON вида {"facts":[{"category","key","value"}]}; ключ и значение обязательны.', true);
+        }
+    };
+    $('saveWt').onclick = () => { try { saveLayer('wt', JSON.parse($('workingEditor').value)); } catch { setStatus('Некорректный JSON working-памяти.', true); } };
+    $('clearSt').onclick = () => clearLayer('st'); $('clearWt').onclick = () => clearLayer('wt'); $('clearLt').onclick = () => clearLayer('lt');
+    $('addRule').onclick = () => { const rules = rulesFromEditor(); rules.push({id:'rule-' + Date.now(), type:'behavior', text:'', enabled:true}); renderRules(rules); const rows=$('rulesList').querySelectorAll('.rule'); editRule(rows[rows.length-1]); };
+    $('applyLtJson').onclick = () => { try { const data = JSON.parse($('ltEditor').value); if (!Array.isArray(data.rules)) throw new Error(); saveLayer('lt', {rules:data.rules}); } catch { setStatus('Нужен JSON с массивом rules.', true); } };
+    $('refreshAll').onclick = () => Promise.all([refreshMemory(), refreshLlmLog(), refreshActionLog()]);
+    $('refreshLlm').onclick = refreshLlmLog; $('refreshActions').onclick = refreshActionLog;
+    $('runScript').onclick = runScript; $('analyzeDialog').onclick = () => analyze('dialog'); $('analyzeScript').onclick = () => analyze('script');
+    $('scriptFile').onchange = async () => {
+        scriptData = null; $('runScript').disabled = true;
+        const file = $('scriptFile').files[0]; if (!file) return;
+        try { scriptData = JSON.parse(await file.text()); if (!Array.isArray(scriptData.dialogs)) throw new Error(); $('runScript').disabled = busy; setStatus('Скрипт загружен: ' + scriptData.dialogs.length + ' диалогов.'); logAction('script_loaded', {dialogs:scriptData.dialogs.length}); }
+        catch { setStatus('Некорректный скрипт: нужен объект с массивом dialogs.', true); }
+    };
+    for (const id of ['mainModel','analysisModel','compression','windowSize','summaryEvery','stickyKeep','factsMax','maxToolCalls','stickyFacts','planning','tools']) $(id).addEventListener('change', saveSettings);
+
+    async function init() {
+        const response = await fetch('/api/models'); const data = await response.json();
+        for (const select of [$('mainModel'), $('analysisModel')]) select.innerHTML = (data.models || []).map(m => '<option value="' + escapeHtml(m.id) + '">' + escapeHtml(m.id + ' — ' + m.model) + '</option>').join('');
+        $('mainModel').value = data.default; const analysis = (data.models || []).find(m => m.model === data.analysisModel); $('analysisModel').value = analysis?.id || data.default;
+        try {
+            const saved = JSON.parse(localStorage.getItem('agentV2Settings') || 'null');
+            if (saved) {
+                for (const [key,value] of Object.entries(saved)) if ($(key)) { if ($(key).type === 'checkbox') $(key).checked = value; else $(key).value = value; }
+                // Legacy sticky compression = lastN history + independently enabled facts.
+                if (saved.compression === 'sticky') { $('compression').value = 'lastN'; $('stickyFacts').checked = true; }
+            }
+        } catch { /* defaults */ }
+        updateCompressionUi(); await restoreHistory();
+    }
+    init().catch(e => setStatus(e.message, true));
+</script>
+</body>
+</html>

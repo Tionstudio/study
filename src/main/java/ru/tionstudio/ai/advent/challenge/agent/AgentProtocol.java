@@ -44,7 +44,7 @@ public class AgentProtocol {
             "update_plan");
 
     /** Hard cap on the number of tool calls accepted in a single reply. */
-    static final int MAX_CALLS_PER_REPLY = 5;
+    public static final int MAX_CALLS_PER_REPLY = 5;
 
     /** A parsed tool call: name plus the raw args object. */
     public record ToolCall(String tool, JsonNode args) {
@@ -96,7 +96,7 @@ public class AgentProtocol {
     /**
      * Prompt for the planning phase: the model returns the plan as strict JSON.
      */
-    static String planningPrompt(String userTask) {
+    public static String planningPrompt(String userTask) {
         return """
                 Составь краткий план решения задачи пользователя. Ответь СТРОГО одним JSON-объектом, без пояснений и markdown:
                 {"steps": ["краткая формулировка шага 1", "шаг 2", ...]}
@@ -110,7 +110,7 @@ public class AgentProtocol {
      * Parses the planning-phase reply into step titles (never null, at least
      * one step; falls back to numbered/plain lines when the JSON is broken).
      */
-    static List<String> parsePlan(String reply) {
+    public static List<String> parsePlan(String reply) {
         List<String> steps = new ArrayList<>();
         if (reply != null) {
             String text = reply.trim();
@@ -423,7 +423,7 @@ public class AgentProtocol {
      * tool call or an unclosed markdown fence — showing it raw looks broken.
      * Removes that dangling tail, keeping the prose part.
      */
-    static String stripTruncatedTail(String text) {
+    public static String stripTruncatedTail(String text) {
         String result = text;
         // Unclosed ``` fence at the tail
         int fences = 0;
@@ -554,19 +554,19 @@ public class AgentProtocol {
     }
 
     /** Allowed fact categories; anything else is stored as "fact". */
-    static final Set<String> FACT_CATEGORIES =
+    public static final Set<String> FACT_CATEGORIES =
             Set.of("goal", "constraint", "preference", "decision", "fact");
 
     /** Hard caps for one extraction result. */
-    static final int MAX_FACTS_PER_EXTRACTION = 20;
-    static final int MAX_FACT_KEY_CHARS = 100;
-    static final int MAX_FACT_VALUE_CHARS = 500;
+    public static final int MAX_FACTS_PER_EXTRACTION = 20;
+    public static final int MAX_FACT_KEY_CHARS = 100;
+    public static final int MAX_FACT_VALUE_CHARS = 500;
 
     /**
      * Prompt for the fact-extraction call. The call is made WITHOUT the dialog
      * context: just this text plus the instruction to answer with strict JSON.
      */
-    static String factExtractionPrompt(String text, boolean fromAssistant) {
+    public static String factExtractionPrompt(String text, boolean fromAssistant) {
         return """
                 Ты извлекаешь факты для долговременной памяти агента (ключ-значение).
                 Ответь СТРОГО одним JSON-объектом, без пояснений и markdown:
@@ -588,7 +588,7 @@ public class AgentProtocol {
      * Prompt for the periodic consolidation of the stored fact list
      * (merge duplicates/synonyms, drop contradicted facts).
      */
-    static String factConsolidationPrompt(String factsJson) {
+    public static String factConsolidationPrompt(String factsJson) {
         return """
                 Ниже — список фактов долговременной памяти агента в формате JSON.
                 Объедини дубли и синонимы (оставь самое свежее значение), удали факты,
@@ -605,7 +605,7 @@ public class AgentProtocol {
      * Parses the fact-extraction reply. Tolerates markdown fences and prose
      * around the JSON object; invalid entries are skipped. Never null.
      */
-    static List<Fact> parseFacts(String reply) {
+    public static List<Fact> parseFacts(String reply) {
         List<Fact> facts = new ArrayList<>();
         if (reply == null) {
             return facts;
