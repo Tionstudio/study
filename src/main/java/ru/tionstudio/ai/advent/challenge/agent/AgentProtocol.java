@@ -41,7 +41,7 @@ public class AgentProtocol {
     private static final Set<String> TOOLS = Set.of(
             "get_system_time", "list_files", "read_file",
             "write_file", "append_file", "delete_file", "calculate",
-            "update_plan");
+            "update_plan", "complete_plan_step", "skip_plan_step", "transition_task", "ask_user", "ask_user_choice");
 
     /** Hard cap on the number of tool calls accepted in a single reply. */
     public static final int MAX_CALLS_PER_REPLY = 5;
@@ -80,8 +80,16 @@ public class AgentProtocol {
                 """;
         if (!withTools) {
             return common + """
-                    У тебя НЕТ доступа к инструментам, файлам и системному времени.
-                    Отвечай обычным текстом: не выдавай JSON для вызова инструментов и не пытайся их вызывать.
+                    У тебя НЕТ доступа к внешним инструментам, файлам и системному времени.
+                    Не вызывай внешние инструменты. Внутренние команды плана разрешены:
+                    complete_plan_step — завершить текущий шаг: {"tool":"complete_plan_step","args":{"result":"полученный результат"}}.
+                    skip_plan_step — пропустить текущий шаг: {"tool":"skip_plan_step","args":{"reason":"причина"}}.
+                    ask_user — задать открытый уточняющий вопрос и остановиться до ответа: {"tool":"ask_user","args":{"question":"вопрос"}}.
+                    ask_user_choice — предложить варианты выбора и остановиться: {"tool":"ask_user_choice","args":{"question":"вопрос","options":[{"id":"demo","label":"Сделать демо"}],"allowCustom":true}}.
+                    update_plan — изменить состав плана только если он стал неправильным.
+                    Выполняй шаги последовательно. Не помечай шаг выполненным без фактического результата.
+                    Если для текущего шага нужны сведения пользователя, остановись через ask_user или ask_user_choice. Если можно предложить понятные альтернативы (например, «Указать мои данные» и «Сделать демо»), ОБЯЗАТЕЛЬНО используй ask_user_choice, а не открытый вопрос. Не принимай решение за пользователя и не пропускай такой шаг самостоятельно.
+                    Финальный ответ давай обычным текстом только после завершения всех шагов.
                     Если пользователь просит запомнить факт, подтверди это и учитывай факт в дальнейших ответах.
                     """;
         }
@@ -96,7 +104,18 @@ public class AgentProtocol {
                 5. append_file — дописать текст в конец файла (файл создаётся, если его нет). Аргументы: {"name": string, "content": string}. Требует подтверждения пользователя.
                 6. delete_file — удалить файл из рабочей директории. Аргументы: {"name": string}. Требует подтверждения пользователя.
                 7. calculate — вычислить арифметическое выражение. Аргументы: {"expression": string}. Поддерживаются числа, + - * / % ^ и скобки.
-                8. update_plan — обновить план выполнения задачи. Аргументы: {"steps": [{"title": string, "status": "pending"|"in_progress"|"done"}, ...]}. Вызывай при переходе к следующему шагу плана, чтобы пользователь видел прогресс.
+                8. update_plan — изменить состав плана, если он стал неправильным. Аргументы: {"steps": [{"title": string, "requiresUserInput": boolean, "requiredForValidation": boolean}, ...]}. Не используй для отметки прогресса или обхода обязательных шагов.
+                9. complete_plan_step — завершить ТОЛЬКО текущий шаг после фактического получения результата. Аргументы: {"result": string}. Код активирует следующий шаг.
+                10. skip_plan_step — пропустить ТОЛЬКО текущий необязательный шаг. Аргументы: {"reason": string}. Причина обязательна. Обязательный для валидации шаг пропустить нельзя; шаг, требующий ввода пользователя, можно пропустить только после его явного разрешения.
+                11. transition_task — запросить переход конечного автомата. Аргументы: {"stage": "research"|"planning"|"execution"|"validation"|"done", "step": string, "expected": string}. Переход применяется только если разрешён кодом. Не пытайся перейти в done: завершение выполняется после отдельной валидации.
+                12. ask_user — задать открытый уточняющий вопрос и остановиться до ответа. Аргументы: {"question": string}.
+                13. ask_user_choice — предложить варианты выбора и остановиться до ответа. Аргументы: {"question": string, "options": [{"id": string, "label": string}, ...], "allowCustom": boolean}. От 2 до 6 вариантов.
+                Команды ask_user и ask_user_choice вызывай отдельно, без других инструментов.
+
+                Выполняй план последовательно: сначала получи результат текущего шага, затем вызови complete_plan_step.
+                Если нужен свободный текст, вызови ask_user. Если можно предложить понятные альтернативы (например, «Указать мои данные» и «Сделать демо»), ОБЯЗАТЕЛЬНО используй ask_user_choice, а не открытый вопрос. Не принимай решение за пользователя и не пропускай такой шаг самостоятельно.
+                Не объединяй complete_plan_step, skip_plan_step, ask_user или ask_user_choice с другими вызовами в параллельный массив.
+                Финальный ответ давай только после завершения или обоснованного пропуска всех шагов.
 
                 Правила вызова:
                 - Чтобы вызвать инструмент, ответь СТРОГО одним JSON-объектом без пояснений, без markdown и без любого другого текста:
@@ -117,71 +136,64 @@ public class AgentProtocol {
     public static String planningPrompt(String userTask) {
         return """
                 Составь краткий план решения задачи пользователя. Ответь СТРОГО одним JSON-объектом, без пояснений и markdown:
-                {"steps": ["краткая формулировка шага 1", "шаг 2", ...]}
+                {"steps": [{"title":"краткая формулировка шага", "requiresUserInput":false, "requiredForValidation":true}, ...]}
                 От 1 до 7 шагов. Если задача простая — план может состоять из одного шага.
+                requiresUserInput=true для любого шага, где нужны данные, решение или подтверждение пользователя
+                (например, определить содержание, уточнить требования, выбрать вариант). Не пропускай такие шаги самостоятельно.
+                requiredForValidation=true для шагов, без фактического результата которых задача не решена.
+                Для необязательных дополнений используй requiredForValidation=false. Хотя бы один шаг должен быть обязательным.
 
                 Задача пользователя: %s
                 """.formatted(userTask);
     }
 
-    /**
-     * Parses the planning-phase reply into step titles (never null, at least
-     * one step; falls back to numbered/plain lines when the JSON is broken).
-     */
-    public static List<String> parsePlan(String reply) {
-        List<String> steps = new ArrayList<>();
+    public record PlanStepSpec(String title, boolean requiresUserInput, boolean requiredForValidation) { }
+
+    /** Parses structured plan steps, retaining the legacy string format as a fallback. */
+    public static List<PlanStepSpec> parsePlanSteps(String reply) {
+        List<PlanStepSpec> steps = new ArrayList<>();
         if (reply != null) {
             String text = reply.trim();
-            // Strip ```json fences the same way as for tool calls
             if (text.startsWith("```")) {
                 text = text.replaceFirst("^```(?:json)?\\s*", "");
                 int end = text.lastIndexOf("```");
-                if (end >= 0) {
-                    text = text.substring(0, end);
-                }
+                if (end >= 0) text = text.substring(0, end);
                 text = text.trim();
             }
             JsonNode json = tryParseJson(text);
             if (json == null) {
-                // Prose around the object: try the outermost {...} span
                 int start = text.indexOf('{');
                 int end = text.lastIndexOf('}');
-                if (start >= 0 && end > start) {
-                    json = tryParseJson(text.substring(start, end + 1));
-                }
+                if (start >= 0 && end > start) json = tryParseJson(text.substring(start, end + 1));
             }
-            if (json != null) {
-                JsonNode arr = json.path("steps");
-                if (arr.isArray()) {
-                    for (JsonNode s : arr) {
-                        if (s.isTextual() && !s.asText().isBlank()) {
-                            steps.add(s.asText().trim());
-                        }
+            if (json != null && json.path("steps").isArray()) {
+                for (JsonNode s : json.path("steps")) {
+                    if (s.isTextual() && !s.asText().isBlank()) {
+                        steps.add(new PlanStepSpec(s.asText().trim(), false, true));
+                    } else if (s.isObject() && s.path("title").isTextual()
+                            && !s.path("title").asText().isBlank()) {
+                        steps.add(new PlanStepSpec(s.path("title").asText().trim(),
+                                s.path("requiresUserInput").asBoolean(false),
+                                s.path("requiredForValidation").asBoolean(true)));
                     }
                 }
             }
             if (steps.isEmpty()) {
-                // Fallback: numbered or bulleted lines, one step per line;
-                // skip lines that are pure JSON punctuation
                 for (String line : text.split("\n")) {
-                    String cleaned = line.trim()
-                            .replaceFirst("^[-*•\\d.)\s]+", "").trim();
-                    if (cleaned.matches("[\"{}\\[\\],:\\s]*")) {
-                        continue;
-                    }
-                    if (!cleaned.isEmpty() && !cleaned.startsWith("```")) {
-                        steps.add(cleaned);
+                    String cleaned = line.trim().replaceFirst("^[-*•\\d.)\s]+", "").trim();
+                    if (!cleaned.matches("[\"{}\\[\\],:\\s]*") && !cleaned.isEmpty() && !cleaned.startsWith("```")) {
+                        steps.add(new PlanStepSpec(cleaned, false, true));
                     }
                 }
             }
         }
-        if (steps.isEmpty()) {
-            steps.add("Выполнить задачу пользователя");
-        }
-        while (steps.size() > 10) {
-            steps.remove(steps.size() - 1);
-        }
+        if (steps.isEmpty()) steps.add(new PlanStepSpec("Выполнить задачу пользователя", false, true));
+        while (steps.size() > 10) steps.remove(steps.size() - 1);
         return steps;
+    }
+
+    public static List<String> parsePlan(String reply) {
+        return parsePlanSteps(reply).stream().map(PlanStepSpec::title).toList();
     }
 
     private static JsonNode tryParseJson(String text) {
@@ -544,6 +556,41 @@ public class AgentProtocol {
                     if (!Set.of("pending", "in_progress", "done").contains(status)) {
                         return "Недопустимый статус шага '" + status
                                 + "'. Допустимые: pending, in_progress, done.";
+                    }
+                }
+                return null;
+            }
+            case "complete_plan_step" -> {
+                if (!args.path("result").isTextual() || args.path("result").asText().isBlank()) {
+                    return "Поле 'result' обязательно: кратко укажите фактически полученный результат.";
+                }
+                return null;
+            }
+            case "skip_plan_step" -> {
+                if (!args.path("reason").isTextual() || args.path("reason").asText().isBlank()) {
+                    return "Поле 'reason' обязательно: укажите причину пропуска шага.";
+                }
+                return null;
+            }
+            case "transition_task" -> {
+                if (!args.path("stage").isTextual() || args.path("stage").asText().isBlank()) {
+                    return "Поле 'stage' обязательно и должно быть строкой.";
+                }
+                return null;
+            }
+            case "ask_user", "ask_user_choice" -> {
+                if (!args.path("question").isTextual() || args.path("question").asText().isBlank()) {
+                    return "Поле 'question' обязательно и должно быть непустой строкой.";
+                }
+                if ("ask_user_choice".equals(tool)) {
+                    JsonNode options = args.path("options");
+                    if (!options.isArray() || options.size() < 2 || options.size() > 6) {
+                        return "Поле 'options' должно содержать от 2 до 6 вариантов.";
+                    }
+                    for (JsonNode option : options) {
+                        if (!option.path("label").isTextual() || option.path("label").asText().isBlank()) {
+                            return "У каждого варианта должна быть непустая строка 'label'.";
+                        }
                     }
                 }
                 return null;

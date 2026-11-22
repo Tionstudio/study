@@ -97,7 +97,9 @@
         .llm-body { padding: 7px 10px 9px; border-top: 1px solid var(--line); }
         .llm-plan { margin: 0 0 8px 20px; padding: 0; color: var(--ink); font-size: 12px; line-height: 1.5; }
         .llm-plan li.done { color: var(--muted); text-decoration: line-through; }
+        .llm-plan li.skipped { color: var(--muted); font-style: italic; }
         .llm-plan li.in_progress { font-weight: 600; }
+        .llm-step-result { display: block; padding: 2px 0 4px; color: var(--muted); font-size: 11px; font-weight: 400; text-decoration: none; }
         .llm-details { margin-top: 5px; }
         .llm-details > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
         .llm-reasoning pre { margin: 5px 0 0; padding: 8px; max-height: 190px; overflow: auto; border-radius: 6px; background: var(--bg); white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.45 var(--code); }
@@ -109,7 +111,16 @@
         .plan li { margin: 3px 0 3px 18px; }
         .plan li.done { text-decoration: line-through; color: var(--muted); }
         .permission { padding: 10px; border: 1px solid oklch(0.75 0.12 80); border-radius: 8px; }
-        .permission-actions { display: flex; gap: 8px; margin-top: 8px; }
+        .permission-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+        .choice-block { align-self: stretch; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--surface); }
+        .choice-block .choice-title { margin-bottom: 8px; font-size: 13px; font-weight: 600; }
+        .choice-block .choice-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+        .choice-block .choice-hint { margin-top: 7px; color: var(--muted); font-size: 11px; }
+        .tool-group > summary { color: var(--ink); font-family: inherit; }
+        .tool-group-body { border-top: 1px solid var(--line); }
+        .tool-operation + .tool-operation { border-top: 1px solid var(--line); }
+        .tool-operation > summary { padding: 6px 10px; font-family: inherit; }
+        .tool-operation[data-status="error"] > summary { color: var(--danger); }
         .typing { margin: 0 16px 12px; display: flex; align-items: center; gap: 9px; color: var(--muted); }
         .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1.2s infinite; }
         @keyframes pulse { 50% { opacity: .3; transform: scale(.8); } }
@@ -138,6 +149,12 @@
         #shortTermSection > .memory-body { max-height: 480px; overflow-y: auto; scrollbar-width: thin; scrollbar-gutter: stable; scrollbar-color: var(--line) transparent; }
         #llmLog, #actionLog { max-height: 360px; overflow-y: auto; scrollbar-width: thin; scrollbar-gutter: stable; scrollbar-color: var(--line) transparent; }
         .memory-body textarea { min-height: 110px; resize: vertical; font: 12px/1.5 var(--code); }
+        .task-grid { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 5px 8px; font-size: 12px; }
+        .task-grid dt { color: var(--muted); } .task-grid dd { margin: 0; overflow-wrap: anywhere; }
+        .task-stage { display: inline-block; width: fit-content; padding: 2px 7px; border-radius: 10px; background: var(--bg); font: 600 11px var(--code); }
+        .task-transitions { max-height: 180px; overflow-y: auto; border-top: 1px solid var(--line); font-size: 11px; }
+        .task-transition { padding: 5px 2px; border-bottom: 1px solid var(--line); color: var(--muted); }
+        .task-transition.rejected { color: var(--danger); }
         .row-actions { display: flex; gap: 7px; flex-wrap: wrap; }
         .st-block { padding: 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
         .st-section-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; font-size: 12px; }
@@ -247,7 +264,7 @@
                         <div class="control"><label for="stickyKeep">Факты: пакет M сообщений</label><input id="stickyKeep" type="number" min="1" max="500" value="20"></div>
                         <div class="control"><label for="factsMax">Максимум sticky-фактов</label><input id="factsMax" type="number" min="5" max="500" value="50"></div>
                         <div class="control"><label for="maxToolCalls">Максимум вызовов подряд</label><input id="maxToolCalls" type="number" min="1" max="50" value="5"></div>
-                        <div class="checks"><label><input id="stickyFacts" type="checkbox" checked> Sticky-факты</label><label><input id="planning" type="checkbox"> Планирование</label><label><input id="tools" type="checkbox"> Инструменты</label></div>
+                        <div class="checks"><label><input id="stickyFacts" type="checkbox" checked> Sticky-факты</label><label hidden title="Конечный автомат и планирование работают всегда"><input id="planning" type="checkbox" checked> Планирование</label><label><input id="tools" type="checkbox"> Инструменты</label></div>
                         <div class="settings-actions">
                             <button id="newTask" class="btn" type="button">Новая задача</button>
                             <button id="resetAll" class="btn danger" type="button">Сбросить всё</button>
@@ -308,6 +325,11 @@
                 <div class="row-actions"><button id="saveWt" class="btn small" type="button">Сохранить WT</button><button id="clearWt" class="btn small danger" type="button">Очистить WT</button></div>
             </div></details>
 
+            <details class="memory-section" open><summary>Задача — конечный автомат</summary><div class="memory-body">
+                <dl id="taskState" class="task-grid"><dt>Состояние</dt><dd>Задача ещё не начата</dd></dl>
+                <div id="taskTransitions" class="task-transitions"></div>
+            </div></details>
+
             <details class="memory-section" open><summary>Long-term — конфиг агента</summary><div class="memory-body">
                 <div id="ruleCandidates" class="rule-candidates"></div>
                 <div id="rulesList" class="rules-list"></div>
@@ -335,8 +357,13 @@
 <script>
     const $ = id => document.getElementById(id);
     const chatEl = $('chat');
+    let chatAutoScroll = true;
+    chatEl.addEventListener('scroll', () => {
+        chatAutoScroll = chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight <= 80;
+    });
     let sessionId = null;
     let busy = false;
+    let activeTurnSerial = 0;
     let paused = false;
     let scriptActive = false;
     let abortRequested = false;
@@ -410,7 +437,9 @@
     function addAssistantMessage(text) {
         const el = addMessage('', 'assistant'); renderAssistantMarkdown(el, text); return el;
     }
-    function scrollChat() { chatEl.scrollTop = chatEl.scrollHeight; }
+    function scrollChat() {
+        if (chatAutoScroll) chatEl.scrollTop = chatEl.scrollHeight;
+    }
     function setStatus(text, error = false) { $('status').textContent = text || ''; $('status').classList.toggle('error', error); }
     function addMessage(text, kind = 'assistant') {
         chatEl.querySelector('.empty')?.remove();
@@ -423,6 +452,107 @@
         const el = document.createElement('details'); el.className = 'event-block';
         el.innerHTML = '<summary>' + escapeHtml(title) + '</summary><pre>' + escapeHtml(typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2)) + '</pre>';
         chatEl.appendChild(el); scrollChat(); return el;
+    }
+    function addTechnicalBlock(title, payload) {
+        const el = addEventBlock(title, payload);
+        el.classList.add('llm-call');
+        el.open = false;
+        return el;
+    }
+    const toolLabels = {
+        get_system_time:'Получение системного времени', list_files:'Просмотр списка файлов',
+        read_file:'Чтение файла', write_file:'Создание или перезапись файла',
+        append_file:'Добавление в файл', delete_file:'Удаление файла', calculate:'Вычисление выражения',
+        update_plan:'Обновление плана', complete_plan_step:'Завершение шага плана',
+        skip_plan_step:'Пропуск шага плана', transition_task:'Смена этапа задачи',
+        ask_user:'Уточняющий вопрос', ask_user_choice:'Запрос выбора пользователя'
+    };
+    function toolLabel(tool) { return toolLabels[tool] || 'Инструмент: ' + (tool || 'неизвестно'); }
+    function addUserChoice(data) {
+        const options = Array.isArray(data.options) ? data.options : [];
+        if (!options.length) return;
+        const el = document.createElement('div'); el.className = 'choice-block';
+        el.innerHTML = '<div class="choice-title">Выберите вариант</div><div class="choice-actions"></div>'
+            + '<div class="choice-hint">' + (data.allowCustom !== false
+                ? 'Или напишите свой ответ в поле ввода.'
+                : 'Свой текст уточнит задание и заменит предложенный выбор.') + '</div>';
+        const actions = el.querySelector('.choice-actions');
+        for (const option of options) {
+            const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'btn small';
+            btn.textContent = option.label || option.id || 'Вариант';
+            btn.onclick = () => {
+                if (busy) return;
+                actions.querySelectorAll('button').forEach(b => b.disabled = true);
+                executeTurn(String(option.label || option.id || ''), {selectedChoice:true});
+            };
+            actions.appendChild(btn);
+        }
+        chatEl.appendChild(el); scrollChat();
+    }
+    function resolveChoiceBlock(text, selectedChoice) {
+        const choices = chatEl.querySelectorAll('.choice-block:not([data-resolved])');
+        const el = choices[choices.length - 1]; if (!el) return;
+        el.dataset.resolved = 'true';
+        el.querySelector('.choice-title').textContent = selectedChoice ? 'Выбрано: ' + text : 'Выбран свой вариант';
+        el.querySelectorAll('button').forEach(b => b.disabled = true);
+        const hint = el.querySelector('.choice-hint'); if (hint) hint.textContent = text;
+    }
+    function newToolGroup() {
+        return {el:null, body:null, count:0, errors:0, startedAt:0, pending:[]};
+    }
+    function updateToolGroupTitle(group, finished = false) {
+        if (!group.el) return;
+        const seconds = ((Date.now() - group.startedAt) / 1000).toFixed(1);
+        group.el.querySelector(':scope > summary').textContent = 'Действия агента · ' + group.count + ' операций'
+            + (group.errors ? ' · ' + group.errors + ' ошибок' : '') + (finished ? ' · ' + seconds + ' с' : '');
+    }
+    function ensureToolGroup(group) {
+        if (group.el) return;
+        group.startedAt = Date.now();
+        group.el = document.createElement('details'); group.el.className = 'event-block tool-group'; group.el.open = true;
+        group.el.innerHTML = '<summary></summary><div class="tool-group-body"></div>';
+        group.body = group.el.querySelector('.tool-group-body');
+        chatEl.appendChild(group.el);
+    }
+    function addGroupedToolCall(group, tool, args) {
+        ensureToolGroup(group); group.count++;
+        const file = args && typeof args.name === 'string' ? ' · ' + args.name : '';
+        const op = document.createElement('details'); op.className = 'tool-operation'; op.dataset.status = 'running'; op.dataset.tool = tool || '';
+        op.innerHTML = '<summary>⋯ ' + escapeHtml(toolLabel(tool) + file) + '</summary><pre>'
+            + escapeHtml(JSON.stringify(args || {}, null, 2)) + '</pre>';
+        group.body.appendChild(op); group.pending.push(op); updateToolGroupTitle(group); scrollChat();
+    }
+    function addGroupedToolResult(group, tool, text, ok) {
+        ensureToolGroup(group);
+        const op = group.pending.shift();
+        if (!op) {
+            addGroupedToolCall(group, tool, {});
+            return addGroupedToolResult(group, tool, text, ok);
+        }
+        op.dataset.status = ok ? 'done' : 'error';
+        if (!ok) group.errors++;
+        op.querySelector('summary').textContent = (ok ? '✓ ' : '✕ ') + op.querySelector('summary').textContent.slice(2);
+        op.querySelector('pre').textContent += '\n\nРезультат:\n' + String(text || '');
+        updateToolGroupTitle(group); scrollChat();
+    }
+    function markToolPermission(group, data) {
+        if (!group.body) return;
+        const operations = [...group.body.querySelectorAll('.tool-operation')];
+        const op = operations.reverse().find(item => item.dataset.tool === data.action && !item.dataset.permissionId);
+        if (!op) return;
+        op.dataset.permissionId = data.id;
+        op.querySelector('summary').textContent += ' · ожидает разрешения';
+    }
+    function resolveToolPermission(group, data) {
+        const op = group.body?.querySelector('[data-permission-id="' + CSS.escape(data.id) + '"]');
+        if (!op) return;
+        op.querySelector('summary').textContent = op.querySelector('summary').textContent
+            .replace(' · ожидает разрешения', data.allowed ? ' · разрешено' : ' · отклонено');
+        op.querySelector('pre').textContent += '\n\nРазрешение пользователя: ' + (data.allowed ? 'разрешено' : 'отклонено');
+    }
+    function finishToolGroup(group) {
+        if (!group.el) return;
+        group.el.open = false; updateToolGroupTitle(group, true);
     }
     function appendLlmDataBlocks(container, log) {
         const response = String(log.response ?? '').trim() ? String(log.response) : '(пустой ответ модели или запрос завершился с ошибкой)';
@@ -443,7 +573,7 @@
     }
     function renderLlmCall(log) {
         if (!log || log.kind === 'chat') return null;
-        const labels = {planning:'Планирование', extract_st:'Извлечение фактов', sticky_extract:'Извлечение фактов', working_update:'Обновление задачи', summary:'Сжатие диалога', facts_consolidate:'Объединение фактов', lt_candidates:'Поиск предпочтений для LT', lt_bootstrap:'Первичная настройка LT', service:'Служебная операция'};
+        const labels = {planning:'Планирование', validation:'Валидация результата', extract_st:'Извлечение фактов', sticky_extract:'Извлечение фактов', working_update:'Обновление задачи', summary:'Сжатие диалога', facts_consolidate:'Объединение фактов', lt_candidates:'Поиск предпочтений для LT', lt_bootstrap:'Первичная настройка LT', service:'Служебная операция'};
         const usage = log.usage || {};
         const title = (labels[log.kind] || 'Служебная операция')
             + (Number.isFinite(log.durationMs) ? ' · ' + (log.durationMs / 1000).toFixed(1) + ' с' : '')
@@ -465,22 +595,30 @@
         }
         chatEl.appendChild(el); scrollChat(); return el;
     }
+    function planStepHtml(s) {
+        const status = typeof s === 'object' ? s.status || '' : '';
+        const title = typeof s === 'object' ? s.title || '' : s;
+        const result = typeof s === 'object' ? s.result || '' : '';
+        return '<li class="' + escapeHtml(status) + '">' + escapeHtml(title)
+            + (result ? '<span class="llm-step-result">' + escapeHtml(result) + '</span>' : '') + '</li>';
+    }
     function attachPlanToLlm(steps) {
         const blocks = chatEl.querySelectorAll('.llm-call[data-kind="planning"]');
         const el = blocks[blocks.length - 1]; if (!el) return false;
         const body = el.querySelector('.llm-body');
         const list = body.querySelector('.llm-plan') || document.createElement('ol'); list.className = 'llm-plan';
-        list.innerHTML = (steps || []).map(s => '<li class="' + escapeHtml(s.status || '') + '">' + escapeHtml(s.title || s) + '</li>').join('');
+        list.innerHTML = (steps || []).map(planStepHtml).join('');
         if (!list.parentNode) body.insertBefore(list, body.firstChild);
         el.classList.add('has-plan'); scrollChat(); return true;
     }
     function addPlan(steps) {
         const el = document.createElement('div'); el.className = 'plan';
-        el.innerHTML = '<strong>План</strong><ul>' + (steps || []).map(s => '<li class="' + escapeHtml(s.status) + '">' + escapeHtml(s.title) + '</li>').join('') + '</ul>';
+        el.innerHTML = '<strong>План</strong><ul>' + (steps || []).map(planStepHtml).join('') + '</ul>';
         chatEl.appendChild(el); scrollChat();
     }
-    function addDecision(id, text, yesLabel = 'Разрешить', noLabel = 'Запретить') {
+    function addDecision(id, text, yesLabel = 'Разрешить', noLabel = 'Запретить', meta = {}) {
         const el = document.createElement('div'); el.className = 'permission';
+        el.dataset.decisionText = text; el.dataset.action = meta.action || ''; el.dataset.file = meta.file || '';
         el.innerHTML = '<div class="decision-text">' + escapeHtml(text) + '</div><div class="permission-actions"></div>';
         const actions = el.querySelector('.permission-actions');
         for (const [label, allow] of [[yesLabel, true], [noLabel, false]]) {
@@ -501,15 +639,18 @@
         chatEl.appendChild(el); scrollChat();
     }
     function addPermission(d) {
-        addDecision(d.id, 'Разрешить ' + (d.action || 'операцию') + ' для «' + (d.file || '') + '»?'
-            + (d.preview ? '\n\nФрагмент:\n' + d.preview : ''));
+        addDecision(d.id, 'Разрешить ' + toolLabel(d.action).toLowerCase() + ' для «' + (d.file || '') + '»?'
+            + (d.preview ? '\n\nФрагмент:\n' + d.preview : ''), 'Разрешить', 'Запретить', d);
     }
     function resolveDecision(d) {
         const el = pendingDecisions.get(d.id); if (!el) return;
-        el.querySelectorAll('button').forEach(b => b.disabled = true);
-        const status = document.createElement('div'); status.className = 'status';
-        status.textContent = d.allowed ? 'Разрешено' : 'Запрещено'; el.appendChild(status);
-        pendingDecisions.delete(d.id);
+        const action = el.dataset.action;
+        const title = 'Разрешение · ' + (d.allowed ? 'разрешено' : 'отклонено')
+            + (action ? ' · ' + toolLabel(action) : '') + (el.dataset.file ? ' · ' + el.dataset.file : '');
+        const collapsed = document.createElement('details'); collapsed.className = 'event-block llm-call'; collapsed.open = false;
+        collapsed.innerHTML = '<summary>' + escapeHtml(title) + '</summary><pre>'
+            + escapeHtml(el.dataset.decisionText + '\n\nРешение: ' + (d.allowed ? 'разрешено' : 'отклонено')) + '</pre>';
+        el.replaceWith(collapsed); pendingDecisions.delete(d.id); scrollChat();
     }
 
     function settingsPayload(overrides = {}) {
@@ -547,7 +688,10 @@
     function setBusy(value, chatRunning = false) {
         busy = value;
         $('settingsFieldset').disabled = value;
-        for (const id of ['input','send','scriptFile','runScript','analyzeDialog','analyzeScript','newTask','resetAll']) $(id).disabled = value || (id === 'runScript' && !scriptData) || (id === 'analyzeScript' && !scriptDialogIds.length);
+        for (const id of ['input','send','scriptFile','runScript','analyzeDialog','analyzeScript','newTask','resetAll']) {
+            const canInterrupt = value && chatRunning && !scriptActive && (id === 'input' || id === 'send');
+            $(id).disabled = (value && !canInterrupt) || (id === 'runScript' && !scriptData) || (id === 'analyzeScript' && !scriptDialogIds.length);
+        }
         $('pauseBtn').classList.toggle('hidden', !(value && chatRunning && sessionId));
         $('abortBtn').classList.toggle('hidden', !(value && chatRunning && sessionId));
         $('typing').classList.toggle('hidden', !value);
@@ -557,11 +701,20 @@
 
     async function executeTurn(text, overrides = {}) {
         if (!text.trim()) return null;
+        const turnSerial = ++activeTurnSerial;
+        if (busy && !scriptActive && sessionId) {
+            abortRequested = true;
+            setStatus('Останавливаем текущее выполнение…');
+            await control('abort');
+        }
         if (!scriptActive) setBusy(true, true);
         abortRequested = false;
+        resolveChoiceBlock(text, overrides.selectedChoice === true);
         addMessage(text, 'user');
         let answerEl = null;
         let answerText = '';
+        let pendingToolEl = null;
+        const toolGroup = newToolGroup();
         let reasoningEl = null;
         let reasoningChars = 0;
         let doneData = null;
@@ -599,10 +752,33 @@
                     }
                     else if (event === 'token') {
                         answerText += data.text || '';
-                        if (answerText.trim()) {
-                            $('typingText').textContent = 'Агент отвечает…';
-                            if (!answerEl) answerEl = addMessage('', 'assistant');
-                            renderAssistantMarkdown(answerEl, answerText); scrollChat();
+                        const trimmed = answerText.trim();
+                        if (trimmed) {
+                            // A model may write prose first and append a tool call afterwards.
+                            // Split at the embedded call too, not only when JSON opens the reply.
+                            let toolJsonStart = answerText.search(/\{\s*"tool"\s*:/);
+                            if (toolJsonStart < 0 && /^[[{]/.test(trimmed)) {
+                                toolJsonStart = answerText.indexOf(trimmed.charAt(0));
+                            }
+                            if (toolJsonStart > 0 && /\[\s*$/.test(answerText.slice(0, toolJsonStart))) {
+                                toolJsonStart = answerText.slice(0, toolJsonStart).lastIndexOf('[');
+                            }
+                            if (toolJsonStart >= 0) {
+                                $('typingText').textContent = 'Подготовка вызова инструмента…';
+                                const prose = answerText.slice(0, toolJsonStart).trim();
+                                if (answerEl && !prose) { answerEl.remove(); answerEl = null; }
+                                if (prose) {
+                                    if (!answerEl) answerEl = addMessage('', 'assistant');
+                                    renderAssistantMarkdown(answerEl, prose);
+                                }
+                                if (!pendingToolEl) pendingToolEl = addTechnicalBlock('Формирование вызова инструмента…', '');
+                                pendingToolEl.querySelector('pre').textContent = answerText.slice(toolJsonStart);
+                                scrollChat();
+                            } else {
+                                $('typingText').textContent = 'Агент отвечает…';
+                                if (!answerEl) answerEl = addMessage('', 'assistant');
+                                renderAssistantMarkdown(answerEl, answerText); scrollChat();
+                            }
                         }
                     } else if (event === 'reasoning') {
                         const text = data.text || '';
@@ -610,7 +786,7 @@
                         $('typingText').textContent = 'Агент размышляет…';
                         if (!reasoningEl) {
                             reasoningEl = addEventBlock('🧠 Размышления', '');
-                            reasoningEl.classList.add('reasoning-block'); reasoningEl.open = true;
+                            reasoningEl.classList.add('reasoning-block'); reasoningEl.open = false;
                         }
                         reasoningEl.querySelector('pre').textContent += text;
                         reasoningChars += text.length;
@@ -628,35 +804,55 @@
                         $('typingText').textContent = 'Выполнение плана…';
                         if (!attachPlanToLlm(data.steps)) addPlan(data.steps);
                     }
-                    else if (event === 'tool_call') addEventBlock('Вызов: ' + data.tool, data.args);
-                    else if (event === 'tool_result') addEventBlock((data.ok ? 'Результат: ' : 'Ошибка: ') + data.tool, data.text);
-                    else if (event === 'permission_request') addPermission(data);
+                    else if (event === 'tool_call') {
+                        // End this streaming lifecycle: the next LLM reply must
+                        // never append its JSON to the preceding visible answer.
+                        if (answerEl) answerEl.remove();
+                        if (pendingToolEl) pendingToolEl.remove();
+                        pendingToolEl = null;
+                        answerEl = null; answerText = '';
+                        addGroupedToolCall(toolGroup, data.tool, data.args);
+                    }
+                    else if (event === 'tool_result') addGroupedToolResult(toolGroup, data.tool, data.text, data.ok);
+                    else if (event === 'waiting_user') {
+                        finishToolGroup(toolGroup);
+                        $('typingText').textContent = 'Ожидается ваш ответ';
+                        addUserChoice(data);
+                    }
+                    else if (event === 'permission_request') { addPermission(data); markToolPermission(toolGroup, data); }
                     else if (event === 'limit_confirm') addDecision(data.requestId, 'Достигнут лимит вызовов инструментов (' + data.max + '). Продолжить выполнение?', 'Продолжить', 'Остановить');
-                    else if (event === 'permission_resolved') resolveDecision(data);
+                    else if (event === 'permission_resolved') { resolveDecision(data); resolveToolPermission(toolGroup, data); }
                     else if (event === 'paused') { paused = true; $('pauseBtn').textContent = 'Продолжить'; $('typingText').textContent = 'Пауза между шагами'; }
                     else if (event === 'resumed') { paused = false; $('pauseBtn').textContent = 'Пауза'; $('typingText').textContent = 'Агент работает…'; }
                     else if (event === 'memory') { currentMemory = data; renderMemory(data); }
+                    else if (event === 'task_state') { currentMemory.taskState = data; renderTaskState(data, currentMemory.taskTransitions || []); refreshMemory(); }
                     else if (event === 'working') { currentMemory.working = data; }
                     else if (event === 'facts') { currentMemory.facts = data.facts || []; renderMemory(currentMemory); }
                     else if (event === 'note') addMessage(data.text, 'note');
-                    else if (event === 'reply_error') addEventBlock('Повреждённый вызов инструмента', data.text);
+                    else if (event === 'reply_error') {
+                        if (pendingToolEl) pendingToolEl.remove();
+                        pendingToolEl = null;
+                        addEventBlock('Повреждённый вызов инструмента', data.text);
+                    }
                     else if (event === 'reply') {
                         const text = data.text || '';
                         if (text.trim()) {
+                            if (pendingToolEl) pendingToolEl.remove();
+                            pendingToolEl = null;
                             answerText = text; if (!answerEl) answerEl = addMessage('', 'assistant');
                             renderAssistantMarkdown(answerEl, answerText);
                         }
                     }
                     else if (event === 'error') { setStatus(data.error, true); addMessage(data.error, 'error'); }
-                    else if (event === 'done') { doneData = data; closeReasoning(); renderTurn(data, answerEl); }
+                    else if (event === 'done') { doneData = data; closeReasoning(); finishToolGroup(toolGroup); renderTurn(data, answerEl); }
                 }
             }
             return {done:doneData, memory:currentMemory, sessionId};
         } catch (e) {
             setStatus(e.message, true); addMessage('Ошибка запроса: ' + e.message, 'error'); return null;
         } finally {
-            closeReasoning();
-            if (!scriptActive) {
+            closeReasoning(); finishToolGroup(toolGroup);
+            if (!scriptActive && turnSerial === activeTurnSerial) {
                 setBusy(false); await Promise.all([refreshMemory(), refreshLlmLog(), refreshActionLog()]);
             }
         }
@@ -761,8 +957,30 @@
         if (!response.ok) return;
         const data = await response.json(); currentMemory = data.memory || {}; renderMemory(currentMemory);
     }
+    function renderTaskState(state, transitions) {
+        if (!state || !state.stage) {
+            $('taskState').innerHTML = '<dt>Состояние</dt><dd>Задача ещё не начата</dd>';
+            $('taskTransitions').innerHTML = ''; return;
+        }
+        const rows = [
+            ['Задача', state.task || '—'],
+            ['Этап', state.stage + (state.waitingForUser ? ' · ожидание пользователя' : state.paused ? ' · пауза' : '')],
+            ['Шаг', Math.min((state.plan || []).length, (state.currentStep ?? 0) + 1) + '/' + ((state.plan || []).length || 0) + ' · ' + (state.step || '—')],
+            ['Ожидается', state.expected || '—'],
+            ['План', state.planStatus || '—'],
+            ['Валидация', state.validationStatus || '—'],
+            ['Ревизия', String(state.revision || 1)]
+        ];
+        $('taskState').innerHTML = rows.map(([key,value]) => '<dt>' + escapeHtml(key) + '</dt><dd>'
+            + (key === 'Этап' ? '<span class="task-stage">' + escapeHtml(value) + '</span>' : escapeHtml(value)) + '</dd>').join('');
+        $('taskTransitions').innerHTML = (transitions || []).map(t => '<div class="task-transition '
+            + (t.allowed ? '' : 'rejected') + '" title="' + escapeHtml(t.reason || '') + '">'
+            + (t.allowed ? '✓' : '✕') + ' ' + escapeHtml(t.from || '—') + ' → ' + escapeHtml(t.to || '—')
+            + '<br>' + escapeHtml(t.reason || '') + '</div>').join('');
+    }
     function renderMemory(memory) {
         $('systemPrompt').textContent = memory.systemPrompt || '';
+        renderTaskState(memory.taskState, memory.taskTransitions);
         const layers = memory.layers || {};
         const names = {shortTerm:'ST', working:'WT', longTerm:'LT', system:'System', user:'User'};
         $('layerChips').innerHTML = Object.entries(names).map(([key,label]) => {
@@ -1143,13 +1361,17 @@
         }
         dialogStats = emptyDialogStats();
         let lastAnswerEl = null;
+        const historyToolGroup = newToolGroup();
         for (const entry of data.entries || []) {
             const p = entry.payload || {};
             if (entry.kind === 'assistant') lastAnswerEl = String(p.text || '').trim() ? addAssistantMessage(p.text) : null;
             else if (entry.kind === 'user') { addMessage(p.text || '', 'user'); lastAnswerEl = null; }
             else if (entry.kind === 'note') addMessage(p.text || '', 'note');
             else if (entry.kind === 'prose') lastAnswerEl = String(p.text || '').trim() ? addAssistantMessage(p.text) : null;
-            else if (entry.kind === 'tool') addEventBlock('Инструмент: ' + p.tool, p);
+            else if (entry.kind === 'tool') {
+                addGroupedToolCall(historyToolGroup, p.tool, p.args);
+                addGroupedToolResult(historyToolGroup, p.tool, p.text, p.ok !== false);
+            }
             else if (entry.kind === 'llmref') {
                 const log = logsById.get(p.logId);
                 if (log?.kind === 'chat' && log.reasoning) {
@@ -1164,8 +1386,13 @@
             else if (entry.kind === 'reply_error') addEventBlock('Ошибка протокола', p.text);
             else if (entry.kind === 'turnstats') renderTurn(p, lastAnswerEl, false);
         }
+        finishToolGroup(historyToolGroup);
         if (!chatEl.children.length) chatEl.innerHTML = '<div class="empty">Начните диалог. Состав памяти и фактические запросы к модели видны в панели справа.</div>';
         currentMemory = data.memory || {}; renderMemory(currentMemory);
+        const waiting = currentMemory.taskState || {};
+        if (waiting.waitingForUser && waiting.pendingOptions?.length) {
+            addUserChoice({question:waiting.pendingQuestion, options:waiting.pendingOptions, allowCustom:waiting.pendingAllowCustom !== false});
+        }
         renderDialogStats();
         await Promise.all([refreshLlmLog(), refreshActionLog()]);
     }
@@ -1263,7 +1490,7 @@
         finally { setBusy(false); }
     }
 
-    $('send').onclick = () => { const text = $('input').value.trim(); if (text && !busy) { $('input').value = ''; executeTurn(text); } };
+    $('send').onclick = () => { const text = $('input').value.trim(); if (text && (!busy || !scriptActive)) { $('input').value = ''; executeTurn(text); } };
     $('input').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('send').click(); } });
     $('pauseBtn').onclick = () => control(paused ? 'resume' : 'pause');
     $('abortBtn').onclick = () => control('abort');

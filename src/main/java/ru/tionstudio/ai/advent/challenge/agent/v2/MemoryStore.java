@@ -150,6 +150,28 @@ public class MemoryStore {
                     )
                     """);
             ensureDialogProfileColumns(c, st);
+            st.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS v2_task_state (
+                        dialog_id TEXT PRIMARY KEY,
+                        state_json TEXT NOT NULL,
+                        revision INTEGER NOT NULL DEFAULT 1,
+                        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    )
+                    """);
+            st.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS v2_task_transitions (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        dialog_id TEXT NOT NULL,
+                        from_stage TEXT NOT NULL,
+                        to_stage TEXT NOT NULL,
+                        allowed INTEGER NOT NULL,
+                        reason TEXT NOT NULL DEFAULT '',
+                        state_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    )
+                    """);
+            st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_v2_task_transitions_dialog "
+                    + "ON v2_task_transitions(dialog_id, id)");
             st.executeUpdate("INSERT OR IGNORE INTO v2_agent_config(id, content) VALUES (1, '{\"rules\":[]}')");
             if (state("lt_initialized") == null) {
                 if (agentConfig().path("rules").isEmpty()) saveAgentConfig(defaultAgentConfig().toString());
@@ -477,6 +499,127 @@ public class MemoryStore {
         executeUpdate("DELETE FROM v2_working WHERE dialog_id = ?", dialogId);
     }
 
+    // ----- task state machine -----
+
+    public record TransitionResult(boolean allowed, ObjectNode state, String reason) { }
+
+    /** Returns null only when this dialog has never had a task. */
+    public synchronized ObjectNode taskState(String dialogId) {
+        try (Connection c = connect(); PreparedStatement ps = c.prepareStatement(
+                "SELECT state_json FROM v2_task_state WHERE dialog_id = ?")) {
+            ps.setString(1, dialogId);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                JsonNode parsed = readJson(rs.getString(1));
+                return parsed.isObject() ? (ObjectNode) parsed : null;
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to load task state for " + dialogId, e);
+        }
+    }
+
+    public synchronized ObjectNode saveTaskState(String dialogId, ObjectNode state) {
+        ObjectNode existing = taskState(dialogId);
+        if (existing != null && "done".equals(existing.path("stage").asText())
+                && existing.path("taskId").asText().equals(state.path("taskId").asText())) {
+            throw new IllegalStateException("Завершённая задача неизменяема");
+        }
+        executeUpdate("""
+                INSERT INTO v2_task_state(dialog_id, state_json, revision, updated_at)
+                VALUES(?, ?, ?, datetime('now'))
+                ON CONFLICT(dialog_id) DO UPDATE SET state_json = excluded.state_json,
+                    revision = excluded.revision, updated_at = datetime('now')
+                """, dialogId, state.toString(), Integer.toString(state.path("revision").asInt(1)));
+        return state;
+    }
+
+    /** Validates and persists a transition plus its audit record in one transaction. */
+    public synchronized TransitionResult transitionTask(String dialogId, String targetName,
+                                                         String step, String expected) {
+        ObjectNode current = taskState(dialogId);
+        if (current == null) {
+            return new TransitionResult(false, null, "Состояние задачи ещё не создано.");
+        }
+        TaskStateMachine.Stage target = TaskStateMachine.Stage.parse(targetName);
+        TaskStateMachine.Decision decision = TaskStateMachine.check(current, target);
+        ObjectNode next = decision.allowed()
+                ? TaskStateMachine.apply(current, target, step, expected) : current;
+        try (Connection c = connect()) {
+            c.setAutoCommit(false);
+            try {
+                if (decision.allowed()) {
+                    try (PreparedStatement ps = c.prepareStatement("""
+                            UPDATE v2_task_state SET state_json = ?, revision = ?,
+                                updated_at = datetime('now') WHERE dialog_id = ? AND revision = ?
+                            """)) {
+                        ps.setString(1, next.toString());
+                        ps.setInt(2, next.path("revision").asInt());
+                        ps.setString(3, dialogId);
+                        ps.setInt(4, current.path("revision").asInt());
+                        if (ps.executeUpdate() != 1) {
+                            throw new IllegalStateException("Task state changed concurrently");
+                        }
+                    }
+                }
+                insertTaskTransition(c, dialogId, current.path("stage").asText(""),
+                        targetName == null ? "" : targetName, decision.allowed(), decision.reason(), next);
+                c.commit();
+                return new TransitionResult(decision.allowed(), next, decision.reason());
+            } catch (Exception e) {
+                c.rollback();
+                throw e;
+            } finally {
+                c.setAutoCommit(true);
+            }
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to transition task state for " + dialogId, e);
+        }
+    }
+
+    private static void insertTaskTransition(Connection c, String dialogId, String from,
+                                              String to, boolean allowed, String reason,
+                                              ObjectNode state) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement("""
+                INSERT INTO v2_task_transitions(dialog_id, from_stage, to_stage, allowed, reason, state_json)
+                VALUES(?, ?, ?, ?, ?, ?)
+                """)) {
+            ps.setString(1, dialogId);
+            ps.setString(2, from);
+            ps.setString(3, to);
+            ps.setInt(4, allowed ? 1 : 0);
+            ps.setString(5, reason);
+            ps.setString(6, state.toString());
+            ps.executeUpdate();
+        }
+    }
+
+    public synchronized ArrayNode taskTransitions(String dialogId, int limit) {
+        ArrayNode result = MAPPER.createArrayNode();
+        int safeLimit = Math.max(1, Math.min(limit, 200));
+        try (Connection c = connect(); PreparedStatement ps = c.prepareStatement("""
+                SELECT id, from_stage, to_stage, allowed, reason, state_json, created_at
+                FROM v2_task_transitions WHERE dialog_id = ? ORDER BY id DESC LIMIT ?
+                """)) {
+            ps.setString(1, dialogId);
+            ps.setInt(2, safeLimit);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    ObjectNode item = result.addObject();
+                    item.put("id", rs.getLong(1));
+                    item.put("from", rs.getString(2));
+                    item.put("to", rs.getString(3));
+                    item.put("allowed", rs.getInt(4) == 1);
+                    item.put("reason", rs.getString(5));
+                    item.set("state", readJson(rs.getString(6)));
+                    item.put("createdAt", rs.getString(7));
+                }
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to load task transitions for " + dialogId, e);
+        }
+        return result;
+    }
+
     // ----- long-term agent config -----
 
     public static ObjectNode defaultAgentConfig() {
@@ -801,6 +944,8 @@ public class MemoryStore {
                 st.executeUpdate("DELETE FROM v2_entries WHERE kind IN ('history', 'summary', 'facts')");
                 st.executeUpdate("DELETE FROM v2_facts");
                 st.executeUpdate("DELETE FROM v2_working");
+                st.executeUpdate("DELETE FROM v2_task_state");
+                st.executeUpdate("DELETE FROM v2_task_transitions");
                 st.executeUpdate("DELETE FROM v2_rule_candidates");
                 try (PreparedStatement ps = c.prepareStatement(
                         "UPDATE v2_dialogs SET lt_config = ?, profile_id = ''")) {

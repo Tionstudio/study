@@ -13,6 +13,7 @@ import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -162,6 +163,8 @@ public class AgentV2Session {
 
     /** Current turn's plan (reset on every user message). */
     private List<PlanStep> plan = new ArrayList<>();
+    /** True only when the latest user message explicitly permits skipping clarification. */
+    private boolean userSkipAuthorized;
 
     private volatile boolean pauseRequested;
     private volatile boolean aborted;
@@ -199,6 +202,9 @@ public class AgentV2Session {
         root.put("historyEmpty", dialogStore.loadEntries(id, "history").isEmpty());
         root.set("ruleCandidates", dialogStore.ruleCandidates(true, id));
         root.set("working", dialogStore.working(id));
+        ObjectNode taskState = dialogStore.taskState(id);
+        root.set("taskState", taskState == null ? MAPPER.createObjectNode() : taskState);
+        root.set("taskTransitions", dialogStore.taskTransitions(id, 50));
         ArrayNode factArray = root.putArray("facts");
         for (AgentProtocol.Fact f : dialogStore.listFacts(id)) {
             factArray.addObject().put("category", f.category())
@@ -367,14 +373,42 @@ public class AgentV2Session {
 
     public void pause() {
         pauseRequested = true;
+        ObjectNode state = dialogStore.taskState(id);
+        if (state != null && !"done".equals(state.path("stage").asText())) {
+            state.put("paused", true);
+            dialogStore.saveTaskState(id, state);
+        }
         LOG.info("Agent v2 session " + id + ": pause requested");
     }
 
     public void resume() {
         pauseRequested = false;
+        ObjectNode state = dialogStore.taskState(id);
+        if (state != null && state.path("paused").asBoolean()
+                && !"done".equals(state.path("stage").asText())) {
+            state.put("paused", false);
+            dialogStore.saveTaskState(id, state);
+        }
         synchronized (pauseLock) {
             pauseLock.notifyAll();
         }
+    }
+
+    private boolean awaitPauseIfRequested(Listener listener) throws IOException {
+        if (!pauseRequested || aborted) return !aborted;
+        listener.on("paused", MAPPER.createObjectNode());
+        synchronized (pauseLock) {
+            while (pauseRequested && !aborted) {
+                try {
+                    pauseLock.wait();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    aborted = true;
+                }
+            }
+        }
+        if (!aborted) listener.on("resumed", MAPPER.createObjectNode());
+        return !aborted;
     }
 
     public void abort() {
@@ -414,10 +448,59 @@ public class AgentV2Session {
         emitHistory("user", userMessage);
         emitTranscriptText("user", userMessage);
         plan = new ArrayList<>();
+        ObjectNode taskState = dialogStore.taskState(id);
+        TaskStateMachine.Stage requestedStage = requestedStage(userMessage);
+        if (requestedStage != null && taskState != null) {
+            TaskStateMachine.Decision decision = TaskStateMachine.check(taskState, requestedStage);
+            if (!decision.allowed()) {
+                ObjectNode note = MAPPER.createObjectNode();
+                note.put("text", "Переход запрещён: " + decision.reason());
+                listener.on("note", note);
+                emitTranscript("note", note);
+                emitDone(listener, 0, 0, false, 0, 0, false, -1);
+                return;
+            }
+        }
+        if (taskState == null || "done".equals(taskState.path("stage").asText())) {
+            String previous = taskState == null ? "" : taskState.path("task").asText("");
+            taskState = TaskStateMachine.newTask(userMessage, previous);
+            dialogStore.saveTaskState(id, taskState);
+            listener.on("task_state", taskState);
+        } else {
+            restoreTaskPlan(taskState);
+            pauseRequested = taskState.path("paused").asBoolean(false);
+            if (taskState.path("waitingForUser").asBoolean(false)) {
+                ObjectNode choice = taskState.putObject("lastChoice");
+                choice.put("question", taskState.path("pendingQuestion").asText(""));
+                String selectedId = "custom";
+                boolean custom = true;
+                for (JsonNode option : taskState.path("pendingOptions")) {
+                    if (userMessage.trim().equals(option.path("label").asText())) {
+                        selectedId = option.path("id").asText("option");
+                        custom = false;
+                        break;
+                    }
+                }
+                choice.put("selectedId", selectedId);
+                choice.put("selectedLabel", userMessage.trim());
+                choice.put("custom", custom);
+                taskState.put("waitingForUser", false);
+                taskState.put("pendingQuestion", "");
+                taskState.putArray("pendingOptions");
+                taskState.put("revision", taskState.path("revision").asInt(0) + 1);
+                dialogStore.saveTaskState(id, taskState);
+                listener.on("task_state", taskState);
+            }
+        }
+        String normalizedReply = userMessage.toLowerCase(java.util.Locale.ROOT);
+        String selectedChoice = taskState.path("lastChoice").path("selectedId").asText("")
+                .toLowerCase(java.util.Locale.ROOT);
+        userSkipAuthorized = selectedChoice.contains("demo") || normalizedReply.matches(".*демо.*");
 
         int consecutiveToolCalls = 0;
         int totalToolCalls = 0;
         int brokenReplies = 0; // consecutive unparseable tool-call attempts
+        int validationAttempts = 0;
         int totalPrompt = 0, totalCompletion = 0, llmCalls = 0;
         int lastCallCompletion = -1; // completion tokens of the latest LLM call
         boolean hasUsage = false;
@@ -475,14 +558,11 @@ public class AgentV2Session {
                 }
             }
 
-            // ----- Planning phase -----
-            if (planning && !aborted) {
-                // Tell the page the planning phase started — its tokens are
-                // NOT streamed, so without this event the chat shows nothing
-                // until the finished plan arrives
+            // ----- Planning phase: FSM is always active, the legacy checkbox is ignored -----
+            taskState = dialogStore.taskState(id);
+            if (!aborted && taskState != null && "planning".equals(taskState.path("stage").asText())
+                    && !"approved".equals(taskState.path("planStatus").asText())) {
                 listener.on("planning", MAPPER.createObjectNode());
-                // Planning is an internal phase: its tokens are NOT streamed
-                // to the chat — only the parsed plan event reaches the page
                 LlmClient.ChatResult planResult = callLlm(
                         List.of(new LlmClient.Message("user",
                                 AgentProtocol.planningPrompt(userMessage))),
@@ -492,7 +572,7 @@ public class AgentV2Session {
                         emitDone(listener, totalPrompt, totalCompletion, hasUsage,
                                 llmCalls, totalToolCalls, true, -1);
                     }
-                    return; // error already reported / client gone / aborted
+                    return;
                 }
                 llmCalls++;
                 if (planResult.promptTokens() != null) {
@@ -504,13 +584,39 @@ public class AgentV2Session {
                     totalCompletion += planResult.completionTokens();
                     hasUsage = true;
                 }
-                List<String> steps = AgentProtocol.parsePlan(planResult.reply());
+                List<AgentProtocol.PlanStepSpec> steps = AgentProtocol.parsePlanSteps(planResult.reply());
                 plan = new ArrayList<>();
-                for (String title : steps) {
-                    plan.add(new PlanStep(title, "pending"));
+                ArrayNode storedPlan = taskState.putArray("plan");
+                for (int i = 0; i < steps.size(); i++) {
+                    AgentProtocol.PlanStepSpec spec = steps.get(i);
+                    String title = spec.title();
+                    String status = i == 0 ? "in_progress" : "pending";
+                    plan.add(new PlanStep(title, status));
+                    storedPlan.addObject().put("title", title).put("status", status).put("result", "")
+                            .put("requiresUserInput", spec.requiresUserInput() || requiresUserInput(title))
+                            .put("requiredForValidation", spec.requiredForValidation());
                 }
+                taskState.put("currentStep", 0);
+                taskState.put("planStatus", "approved");
+                taskState.put("step", steps.isEmpty() ? "Выполнить задачу" : steps.get(0).title());
+                taskState.put("expected", "Результат, готовый к отдельной валидации");
+                dialogStore.saveTaskState(id, taskState);
                 emitPlan(listener, true);
-                LOG.info("Agent session " + id + ": plan, " + plan.size() + " steps");
+                LOG.info("Agent session " + id + ": plan approved automatically, " + plan.size() + " steps");
+            }
+            taskState = dialogStore.taskState(id);
+            if (!aborted && taskState != null && "planning".equals(taskState.path("stage").asText())
+                    && "approved".equals(taskState.path("planStatus").asText())) {
+                MemoryStore.TransitionResult started = dialogStore.transitionTask(
+                        id, "execution", taskState.path("step").asText(),
+                        taskState.path("expected").asText());
+                if (!started.allowed()) throw new IllegalStateException(started.reason());
+                listener.on("task_state", started.state());
+            }
+            if (!awaitPauseIfRequested(listener)) {
+                emitDone(listener, totalPrompt, totalCompletion, hasUsage,
+                        llmCalls, totalToolCalls, true, -1);
+                return;
             }
 
             // ----- Summary maintenance (compression "summary") -----
@@ -576,13 +682,57 @@ public class AgentV2Session {
                 }
 
                 String reply = result.reply() == null ? "" : result.reply().trim();
-                // Tools disabled (dialog-script plain-chat mode): every reply
-                // is a final answer, the tool protocol is not applied at all
-                AgentProtocol.ParseResult parsed = toolsEnabled
-                        ? AgentProtocol.parseFull(reply)
-                        : new AgentProtocol.ParseResult(List.of(), "");
-                List<AgentProtocol.ToolCall> calls = parsed.calls();
-                if (toolsEnabled && calls.isEmpty() && AgentProtocol.looksLikeToolCall(reply)) {
+                // Internal FSM/plan calls are recognized even when external tools
+                // are disabled; their JSON must never leak into the visible answer.
+                AgentProtocol.ParseResult parsed = AgentProtocol.parseFull(reply);
+                List<AgentProtocol.ToolCall> calls = toolsEnabled
+                        ? parsed.calls()
+                        : parsed.calls().stream()
+                                .filter(c -> Set.of("update_plan", "complete_plan_step", "skip_plan_step", "transition_task", "ask_user", "ask_user_choice").contains(c.tool()))
+                                .toList();
+                if (calls.size() == 1 && Set.of("ask_user", "ask_user_choice").contains(calls.get(0).tool())) {
+                    AgentProtocol.ToolCall ask = calls.get(0);
+                    String validationError = AgentProtocol.validate(ask);
+                    if (validationError != null) {
+                        history.add(new Entry("assistant", reply));
+                        history.add(new Entry("tool", "[ошибка протокола]: " + validationError));
+                        emitHistory("assistant", reply);
+                        emitHistory("tool", "[ошибка протокола]: " + validationError);
+                        continue;
+                    }
+                    String question = ask.args().path("question").asText().trim();
+                    ObjectNode waiting = dialogStore.taskState(id);
+                    if (waiting != null) {
+                        waiting.put("waitingForUser", true);
+                        waiting.put("pendingQuestion", question);
+                        waiting.put("pendingAllowCustom", ask.args().path("allowCustom").asBoolean(true));
+                        if ("ask_user_choice".equals(ask.tool())) {
+                            waiting.set("pendingOptions", ask.args().path("options").deepCopy());
+                        } else {
+                            waiting.putArray("pendingOptions");
+                        }
+                        waiting.put("expected", "Ответ пользователя на уточняющий вопрос");
+                        waiting.put("revision", waiting.path("revision").asInt(0) + 1);
+                        dialogStore.saveTaskState(id, waiting);
+                        listener.on("task_state", waiting);
+                    }
+                    history.add(new Entry("assistant", question));
+                    emitHistory("assistant", question);
+                    emitTranscriptText("assistant", question);
+                    ObjectNode questionEvent = MAPPER.createObjectNode();
+                    questionEvent.put("text", question);
+                    listener.on("reply", questionEvent);
+                    ObjectNode waitingEvent = MAPPER.createObjectNode();
+                    waitingEvent.put("question", question);
+                    waitingEvent.set("options", ask.args().path("options").deepCopy());
+                    waitingEvent.put("allowCustom", ask.args().path("allowCustom").asBoolean(true));
+                    listener.on("waiting_user", waitingEvent);
+                    listener.on("memory", memorySnapshot());
+                    emitDone(listener, totalPrompt, totalCompletion, hasUsage,
+                            llmCalls, totalToolCalls, false, lastCallCompletion);
+                    return;
+                }
+                if (calls.isEmpty() && AgentProtocol.looksLikeToolCall(reply)) {
                     // The model tried to call a tool but produced unparseable
                     // JSON: the raw payload must NOT become a normal chat
                     // answer — flag it as a protocol error and let the model
@@ -610,11 +760,12 @@ public class AgentV2Session {
                                 llmCalls, totalToolCalls, false, lastCallCompletion);
                         return;
                     }
-                    String feedback = "[ошибка протокола]: Ваш предыдущий ответ похож на "
-                            + "вызов инструмента, но не распознан — JSON повреждён. "
-                            + "Повторите вызов СТРОГО одним JSON-объектом "
-                            + "{\"tool\": \"<имя>\", \"args\": {...}} без markdown и без "
-                            + "пояснений — или дайте финальный ответ обычным текстом.";
+                    String feedback = toolsEnabled
+                            ? "[ошибка протокола]: Вызов инструмента не распознан — JSON повреждён. "
+                                    + "Повторите вызов СТРОГО одним JSON-объектом без markdown "
+                                    + "или дайте финальный ответ обычным текстом."
+                            : "[ошибка протокола]: Внешние инструменты отключены. "
+                                    + "Не выдавай JSON вызова инструмента; дайте ответ обычным текстом.";
                     history.add(new Entry("tool", feedback));
                     emitHistory("tool", feedback);
                     continue;
@@ -648,11 +799,81 @@ public class AgentV2Session {
                         LOG.warning("Agent session " + id
                                 + ": reply truncated by token limit (finish_reason=length)");
                     }
+                    ObjectNode progressState = dialogStore.taskState(id);
+                    if (progressState != null && !TaskStateMachine.validationReady(progressState)) {
+                        String feedback = "[обязательные шаги не выполнены]: Финальный ответ и валидация пока запрещены. "
+                                + "Выполни текущий шаг '" + progressState.path("step").asText("")
+                                + "', затем вызови complete_plan_step с фактическим результатом. "
+                                + "Если нужны сведения пользователя, вызови ask_user и остановись. "
+                                + "skip_plan_step разрешён только для необязательного шага. "
+                                + "Если план стал неправильным, пересоставь его через update_plan.";
+                        history.add(new Entry("assistant", finalReply));
+                        history.add(new Entry("tool", feedback));
+                        emitHistory("assistant", finalReply);
+                        emitHistory("tool", feedback);
+                        continue;
+                    }
+                    // A textual reply is a completion candidate, not an automatic done.
+                    MemoryStore.TransitionResult validating = dialogStore.transitionTask(
+                            id, "validation", "Проверить результат", "Решение о корректности результата");
+                    if (!validating.allowed()) throw new IllegalStateException(validating.reason());
+                    listener.on("task_state", validating.state());
+                    validationAttempts++;
+                    ObjectNode validation = validateFinalReply(userMessage, finalReply, listener);
+                    llmCalls++;
+                    Integer validationPrompt = validation.path("promptTokens").isInt()
+                            ? validation.get("promptTokens").asInt() : null;
+                    Integer validationCompletion = validation.path("completionTokens").isInt()
+                            ? validation.get("completionTokens").asInt() : null;
+                    if (validationPrompt != null) {
+                        totalPrompt += validationPrompt;
+                        lastPromptTokens = validationPrompt;
+                        hasUsage = true;
+                    }
+                    if (validationCompletion != null) {
+                        totalCompletion += validationCompletion;
+                        hasUsage = true;
+                    }
+                    boolean passed = validation.path("passed").asBoolean(false);
+                    ObjectNode current = dialogStore.taskState(id);
+                    current.put("validationStatus", passed ? "passed" : "failed");
+                    current.put("validationFeedback", validation.path("feedback").asText(""));
+                    dialogStore.saveTaskState(id, current);
+                    // Validation of the final answer does not prove that every plan
+                    // step ran: statuses are changed only by actual update_plan calls.
+                    MemoryStore.TransitionResult afterValidation = dialogStore.transitionTask(
+                            id, passed ? "done" : "execution",
+                            passed ? "Задача завершена" : "Исправить результат после валидации",
+                            passed ? "Проверенный результат" : "Исправленный результат");
+                    if (!afterValidation.allowed()) throw new IllegalStateException(afterValidation.reason());
+                    listener.on("task_state", afterValidation.state());
+                    if (!passed && validationAttempts < 2 && !aborted) {
+                        String feedback = "[валидация не пройдена]: "
+                                + validation.path("feedback").asText("Исправь ответ и повтори.")
+                                + " Не выдавай тот же ответ без исправлений.";
+                        history.add(new Entry("assistant", finalReply));
+                        history.add(new Entry("tool", feedback));
+                        emitHistory("assistant", finalReply);
+                        emitHistory("tool", feedback);
+                        ObjectNode note = MAPPER.createObjectNode();
+                        note.put("text", "Валидация не пройдена: "
+                                + validation.path("feedback").asText("требуется исправление"));
+                        listener.on("note", note);
+                        emitTranscript("note", note);
+                        continue;
+                    }
                     history.add(new Entry("assistant", finalReply));
                     emitHistory("assistant", finalReply);
                     emitTranscriptText("assistant", finalReply);
-                    markPlanDone();
-                    emitPlan(listener);
+                    if (passed) {
+                        emitPlan(listener);
+                    } else {
+                        ObjectNode note = MAPPER.createObjectNode();
+                        note.put("text", "Ответ показан, но задача НЕ завершена: валидация не пройдена после "
+                                + validationAttempts + " попыток. Следующее сообщение продолжит исправление.");
+                        listener.on("note", note);
+                        emitTranscript("note", note);
+                    }
                     emitDone(listener, totalPrompt, totalCompletion, hasUsage,
                             llmCalls, totalToolCalls, false, lastCallCompletion);
                     return;
@@ -669,7 +890,7 @@ public class AgentV2Session {
                     emitTranscriptText("prose", prose);
                 }
                 long realCalls = calls.stream()
-                        .filter(c -> !"update_plan".equals(c.tool())).count();
+                        .filter(c -> !Set.of("update_plan", "complete_plan_step", "skip_plan_step", "transition_task", "ask_user", "ask_user_choice").contains(c.tool())).count();
                 consecutiveToolCalls += (int) realCalls;
                 totalToolCalls += (int) realCalls;
                 if (consecutiveToolCalls > maxToolCalls) {
@@ -776,24 +997,8 @@ public class AgentV2Session {
                     emitTranscript("tool", toolEntry);
                 }
 
-                // Pause between steps: the in-flight LLM request has already
-                // finished, the agent stops before the next one
-                if (pauseRequested && !aborted) {
-                    listener.on("paused", MAPPER.createObjectNode());
-                    synchronized (pauseLock) {
-                        while (pauseRequested && !aborted) {
-                            try {
-                                pauseLock.wait();
-                            } catch (InterruptedException e) {
-                                Thread.currentThread().interrupt();
-                                aborted = true;
-                            }
-                        }
-                    }
-                    if (!aborted) {
-                        listener.on("resumed", MAPPER.createObjectNode());
-                    }
-                }
+                // Pause between steps without losing the persisted FSM stage.
+                awaitPauseIfRequested(listener);
                 if (aborted) {
                     emitDone(listener, totalPrompt, totalCompletion, hasUsage,
                             llmCalls, totalToolCalls, true, -1);
@@ -804,6 +1009,59 @@ public class AgentV2Session {
             // Stale requests must not block future runs
             permissionRegistry.values().forEach(f -> f.complete(false));
         }
+    }
+
+    private void restoreTaskPlan(ObjectNode state) {
+        plan = new ArrayList<>();
+        for (JsonNode step : state.path("plan")) {
+            if (step.path("title").isTextual()) {
+                plan.add(new PlanStep(step.path("title").asText(),
+                        step.path("status").asText("pending")));
+            }
+        }
+    }
+
+    /** Independent validation call: no thinking, no tools, no full chat transcript. */
+    private ObjectNode validateFinalReply(String userMessage, String answer,
+                                          Listener listener) throws IOException {
+        ObjectNode state = dialogStore.taskState(id);
+        String prompt = """
+                Проверь кандидат ответа ассистента. Ответь СТРОГО JSON без markdown:
+                {"passed": true|false, "feedback": "краткая причина или пустая строка"}
+                passed=true только если ответ решает задачу, не противоречит плану и не содержит явных ошибок.
+                Не требуй необязательных дополнений.
+
+                Задача: %s
+                План: %s
+                Ожидаемый результат: %s
+                Кандидат ответа: %s
+                """.formatted(userMessage, state.path("plan").toString(),
+                state.path("expected").asText(""), answer);
+        ObjectNode result = MAPPER.createObjectNode();
+        LlmClient.ChatResult checked = callLlm(List.of(new LlmClient.Message("user", prompt)),
+                listener, false, "validation");
+        if (checked == null) {
+            result.put("passed", false);
+            result.put("feedback", "Отдельный запрос валидации не выполнен.");
+            return result;
+        }
+        if (checked.promptTokens() != null) result.put("promptTokens", checked.promptTokens());
+        if (checked.completionTokens() != null) result.put("completionTokens", checked.completionTokens());
+        try {
+            String raw = checked.reply() == null ? "" : checked.reply().trim();
+            if (raw.startsWith("```")) {
+                raw = raw.replaceFirst("^```(?:json)?\\s*", "");
+                int end = raw.lastIndexOf("```");
+                if (end >= 0) raw = raw.substring(0, end);
+            }
+            JsonNode parsed = MAPPER.readTree(raw.trim());
+            result.put("passed", parsed.path("passed").asBoolean(false));
+            result.put("feedback", parsed.path("feedback").asText(""));
+        } catch (Exception e) {
+            result.put("passed", false);
+            result.put("feedback", "Валидатор вернул некорректный JSON.");
+        }
+        return result;
     }
 
     /**
@@ -835,6 +1093,9 @@ public class AgentV2Session {
         LlmClient.ChatResult result = null;
         String failure = "";
         try {
+            // A restored/requested pause takes effect before every service or
+            // chat request; no new LLM work starts until the user resumes.
+            if (!awaitPauseIfRequested(listener)) return null;
             LlmClient.ChatOptions options = streamTokens
                     ? LlmClient.ChatOptions.defaults()
                     : new LlmClient.ChatOptions("none", "", null, List.of(), "none", null);
@@ -864,6 +1125,9 @@ public class AgentV2Session {
                         }
                     },
                     conn -> activeLlmConnection = conn);
+            // Keep the completed result local while paused. After resume the
+            // caller processes it once: no repeated generation or history entry.
+            if (!awaitPauseIfRequested(listener)) return null;
             return result;
         } catch (UncheckedIOException e) {
             throw e;
@@ -950,6 +1214,9 @@ public class AgentV2Session {
     private AgentTools.ToolResult executeValidated(AgentProtocol.ToolCall call,
                                                    Listener listener, int index)
             throws IOException {
+        if (!awaitPauseIfRequested(listener)) {
+            return new AgentTools.ToolResult(false, "Выполнение прервано до запуска инструмента.");
+        }
         String validationError = AgentProtocol.validate(call);
         if (validationError != null) {
             LOG.info("Agent session " + id + ": tool call rejected by validation: "
@@ -957,11 +1224,42 @@ public class AgentV2Session {
             return new AgentTools.ToolResult(false, "Вызов отклонён валидацией: " + validationError);
         }
 
+        if ("transition_task".equals(call.tool())) {
+            MemoryStore.TransitionResult transition = dialogStore.transitionTask(id,
+                    call.args().path("stage").asText(""), call.args().path("step").asText(""),
+                    call.args().path("expected").asText(""));
+            listener.on("task_state", transition.state() == null
+                    ? MAPPER.createObjectNode() : transition.state());
+            listener.on("memory", memorySnapshot());
+            return new AgentTools.ToolResult(transition.allowed(), transition.reason());
+        }
+
+        ObjectNode currentTask = dialogStore.taskState(id);
+        String stage = currentTask == null ? "" : currentTask.path("stage").asText();
+        if (AgentTools.requiresPermission(call.tool()) && !"execution".equals(stage)) {
+            return new AgentTools.ToolResult(false,
+                    "Изменение файлов разрешено только на этапе execution; текущий этап: " + stage + ".");
+        }
+        if (!Set.of("update_plan", "complete_plan_step", "skip_plan_step", "transition_task",
+                "get_system_time", "list_files", "read_file", "calculate")
+                .contains(call.tool()) && !"execution".equals(stage)) {
+            return new AgentTools.ToolResult(false, "Инструмент запрещён на этапе " + stage + ".");
+        }
+
         // Internal progress tool: no files, no permission
         if ("update_plan".equals(call.tool())) {
             applyPlanUpdate(call.args());
             emitPlan(listener);
-            return new AgentTools.ToolResult(true, "План обновлён.");
+            return new AgentTools.ToolResult(true, "Состав плана обновлён; первый шаг активирован.");
+        }
+        if (Set.of("complete_plan_step", "skip_plan_step").contains(call.tool())) {
+            AgentTools.ToolResult progress = completeCurrentPlanStep(call);
+            if (progress.ok()) {
+                restoreTaskPlan(dialogStore.taskState(id));
+                emitPlan(listener);
+                listener.on("memory", memorySnapshot());
+            }
+            return progress;
         }
 
         if (AgentTools.requiresPermission(call.tool())) {
@@ -1007,6 +1305,9 @@ public class AgentV2Session {
             }
         }
 
+        if (!awaitPauseIfRequested(listener)) {
+            return new AgentTools.ToolResult(false, "Выполнение прервано после разрешения, до запуска инструмента.");
+        }
         try {
             return tools.execute(call.tool(),
                     call.args().path("name").asText(null),
@@ -1053,33 +1354,90 @@ public class AgentV2Session {
         }
     }
 
-    /** Replaces the plan with the steps supplied by an update_plan call. */
-    private void applyPlanUpdate(JsonNode args) {
-        List<PlanStep> updated = new ArrayList<>();
-        for (JsonNode s : args.path("steps")) {
-            String title = abbreviate(s.path("title").asText(""), 200);
-            if (title.isEmpty()) {
-                continue;
-            }
-            String status = s.path("status").asText("pending");
-            updated.add(new PlanStep(title, status));
-            if (updated.size() >= 10) {
-                break;
-            }
+    /** Completes or skips exactly the current step; the next one is activated by code. */
+    private AgentTools.ToolResult completeCurrentPlanStep(AgentProtocol.ToolCall call) {
+        ObjectNode state = dialogStore.taskState(id);
+        if (state == null || !"execution".equals(state.path("stage").asText())) {
+            return new AgentTools.ToolResult(false, "Шаги можно завершать только на этапе execution.");
         }
-        if (!updated.isEmpty()) {
-            plan = updated;
+        JsonNode steps = state.path("plan");
+        int current = state.path("currentStep").asInt(0);
+        if (!steps.isArray() || current < 0 || current >= steps.size()) {
+            return new AgentTools.ToolResult(false, "Нет активного шага: все шаги уже обработаны.");
         }
+        ObjectNode step = (ObjectNode) steps.get(current);
+        if (!"in_progress".equals(step.path("status").asText())) {
+            return new AgentTools.ToolResult(false, "Текущий шаг не активен; переход между шагами выполняется только кодом.");
+        }
+        boolean skipped = "skip_plan_step".equals(call.tool());
+        if (skipped && step.path("requiredForValidation").asBoolean(true)) {
+            return new AgentTools.ToolResult(false,
+                    "Обязательный шаг нельзя пропустить. Получите результат, выполните шаг или пересоставьте план с изменённой задачей.");
+        }
+        if (skipped && step.path("requiresUserInput").asBoolean(false) && !userSkipAuthorized) {
+            return new AgentTools.ToolResult(false,
+                    "Этот шаг требует ввода пользователя. Вызови ask_user; пропуск возможен только после явного выбора пользователя (например, «сделай демо»).");
+        }
+        step.put("status", skipped ? "skipped" : "done");
+        step.put("result", call.args().path(skipped ? "reason" : "result").asText());
+        int next = current + 1;
+        state.put("currentStep", next);
+        if (next < steps.size()) {
+            ObjectNode nextStep = (ObjectNode) steps.get(next);
+            nextStep.put("status", "in_progress");
+            state.put("step", nextStep.path("title").asText());
+            state.put("expected", "Результат шага: " + nextStep.path("title").asText());
+        } else {
+            state.put("step", "Все шаги обработаны");
+            state.put("expected", "Финальный ответ для отдельной валидации");
+        }
+        dialogStore.saveTaskState(id, state);
+        return new AgentTools.ToolResult(true, (skipped ? "Шаг пропущен: " : "Шаг выполнен: ")
+                + step.path("title").asText() + (next < steps.size()
+                ? ". Активирован следующий шаг: " + steps.get(next).path("title").asText()
+                : ". Все шаги обработаны; теперь можно дать финальный ответ."));
     }
 
-    /** All steps are done when the final answer is given. */
-    private void markPlanDone() {
-        if (plan.isEmpty()) {
-            return;
+    /** Changes plan composition and restarts progression at its first step. */
+    private void applyPlanUpdate(JsonNode args) {
+        ObjectNode state = dialogStore.taskState(id);
+        if (state == null || "done".equals(state.path("stage").asText())) return;
+        ArrayNode stored = state.putArray("plan");
+        plan = new ArrayList<>();
+        for (JsonNode s : args.path("steps")) {
+            String title = abbreviate(s.path("title").asText(""), 200);
+            if (title.isEmpty()) continue;
+            String status = plan.isEmpty() ? "in_progress" : "pending";
+            plan.add(new PlanStep(title, status));
+            stored.addObject().put("title", title).put("status", status).put("result", "")
+                    .put("requiresUserInput", s.path("requiresUserInput").asBoolean(requiresUserInput(title)))
+                    .put("requiredForValidation", s.path("requiredForValidation").asBoolean(true));
+            if (plan.size() >= 10) break;
         }
-        plan = plan.stream()
-                .map(s -> new PlanStep(s.title(), "done"))
-                .toList();
+        state.put("currentStep", 0);
+        if (!plan.isEmpty()) {
+            state.put("step", plan.get(0).title());
+            state.put("expected", "Результат шага: " + plan.get(0).title());
+        }
+        dialogStore.saveTaskState(id, state);
+    }
+
+    private static TaskStateMachine.Stage requestedStage(String message) {
+        String text = message.toLowerCase(java.util.Locale.ROOT);
+        if (!text.matches(".*(?:перейди|переходи|перейти|заверши(?:ть)? задачу).*")) return null;
+        if (text.contains("валидац") || text.contains("проверке результата")) return TaskStateMachine.Stage.VALIDATION;
+        if (text.contains("выполнен") || text.contains("реализац")) return TaskStateMachine.Stage.EXECUTION;
+        if (text.contains("планир") || text.contains("плану")) return TaskStateMachine.Stage.PLANNING;
+        if (text.contains("исслед")) return TaskStateMachine.Stage.RESEARCH;
+        if (text.matches(".*(?:заверши(?:ть)? задачу|перейди к завершению|перейти к завершению).*")) {
+            return TaskStateMachine.Stage.DONE;
+        }
+        return null;
+    }
+
+    private static boolean requiresUserInput(String title) {
+        return title.toLowerCase(java.util.Locale.ROOT)
+                .matches(".*(?:уточн|спрос|запроси(?:ть)? у пользователя|получи(?:ть)? от пользователя|clarif|ask (?:the )?user).*");
     }
 
     private void emitPlan(Listener listener) throws IOException {
@@ -1098,8 +1456,12 @@ public class AgentV2Session {
             return;
         }
         ArrayNode steps = MAPPER.createArrayNode();
-        for (PlanStep s : plan) {
-            steps.addObject().put("title", s.title()).put("status", s.status());
+        ObjectNode state = dialogStore.taskState(id);
+        JsonNode storedSteps = state == null ? MAPPER.createArrayNode() : state.path("plan");
+        for (int i = 0; i < plan.size(); i++) {
+            PlanStep s = plan.get(i);
+            steps.addObject().put("title", s.title()).put("status", s.status())
+                    .put("result", storedSteps.path(i).path("result").asText(""));
         }
         ObjectNode json = MAPPER.createObjectNode();
         json.set("steps", steps);
@@ -1123,6 +1485,11 @@ public class AgentV2Session {
         String workingText = working.isEmpty() ? "" : "[WORKING — активная задача]\n" + working.toString();
         messages.add(new LlmClient.Message("system", system));
         messages.add(new LlmClient.Message("system", longTerm));
+        ObjectNode taskState = dialogStore.taskState(id);
+        if (taskState != null) {
+            messages.add(new LlmClient.Message("system", "[TASK STATE — конечный автомат, изменяется только кодом]\n"
+                    + taskState + "\nСоблюдай текущий этап. Нельзя завершить задачу без validation=passed."));
+        }
         if (!workingText.isEmpty()) {
             messages.add(new LlmClient.Message("system", workingText));
         }
@@ -1454,6 +1821,9 @@ public class AgentV2Session {
                 при необходимости acceptanceCriteria и status. Уточнение обновляет текущую
                 задачу. Только приветствие, благодарность или small talk без новой задачи
                 не меняют WT: верни {"changed":false,"operations":[]}.
+                Команды «перейди к валидации», «перейди к выполнению», «заверши задачу» — это
+                управление существующей задачей, а НЕ новая задача. Никогда не заменяй task на них
+                и не присваивай status значения validating/done по такой команде; переход контролирует код.
                 В остальных случаях верни только изменения:
                 {"changed":true,"operations":[{"op":"set|append|remove",
                 "field":"имя поля","value":значение}]}.
@@ -1483,6 +1853,15 @@ public class AgentV2Session {
                 text = text.substring(start, end + 1);
             }
             JsonNode parsed = MAPPER.readTree(text);
+            if (requestedStage(userMessage) != null && parsed.path("operations").isArray()) {
+                ObjectNode safePatch = (ObjectNode) parsed.deepCopy();
+                ArrayNode operations = (ArrayNode) safePatch.path("operations");
+                for (int i = operations.size() - 1; i >= 0; i--) {
+                    String field = operations.get(i).path("field").asText("");
+                    if (Set.of("task", "status").contains(field)) operations.remove(i);
+                }
+                parsed = safePatch;
+            }
             ObjectNode updated = applyWorkingPatch(current, parsed);
             if (updated != null) {
                 dialogStore.saveWorking(id, updated);

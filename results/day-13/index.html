@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Демонстрационный одностраничный сайт-визитка продуктового дизайнера Анны Смирновой.">
+  <meta name="theme-color" content="#f4f3ee">
+  <title>Анна Смирнова — продуктовый дизайнер</title>
+  <style>
+    :root {
+      --bg: #f4f3ee;
+      --surface: #ffffff;
+      --ink: #17251e;
+      --muted: #5d6861;
+      --accent: #286348;
+      --accent-soft: #dce9df;
+      --line: #d9ddd7;
+      --radius: 24px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--bg);
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.6;
+    }
+    a { color: inherit; }
+    a:focus-visible {
+      outline: 3px solid var(--accent);
+      outline-offset: 4px;
+    }
+    .container {
+      width: min(1120px, calc(100% - 40px));
+      margin-inline: auto;
+    }
+    .skip-link {
+      position: absolute;
+      top: 12px;
+      left: 12px;
+      padding: 10px 16px;
+      background: var(--surface);
+      transform: translateY(-160%);
+      z-index: 10;
+    }
+    .skip-link:focus { transform: translateY(0); }
+
+    .site-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding-block: 28px;
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+    .brand-mark {
+      display: grid;
+      width: 42px;
+      height: 42px;
+      place-items: center;
+      border-radius: 50%;
+      color: #fff;
+      background: var(--accent);
+      font-size: 0.85rem;
+      letter-spacing: 0.04em;
+    }
+    .nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 24px;
+    }
+    .nav a {
+      color: var(--muted);
+      font-size: 0.95rem;
+      text-decoration: none;
+    }
+    .nav a:hover { color: var(--accent); }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(300px, 0.75fr);
+      gap: 64px;
+      align-items: center;
+      min-height: 620px;
+      padding-block: 64px 88px;
+    }
+    .eyebrow {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin: 0 0 20px;
+      color: var(--accent);
+      font-size: 0.9rem;
+      font-weight: 650;
+    }
+    .status-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: #3a8b60;
+      box-shadow: 0 0 0 5px var(--accent-soft);
+    }
+    h1, h2, h3, p { overflow-wrap: break-word; }
+    h1 {
+      max-width: 760px;
+      margin: 0;
+      font-size: clamp(3.2rem, 8vw, 6.7rem);
+      font-weight: 750;
+      letter-spacing: -0.065em;
+      line-height: 0.94;
+    }
+    .lead {
+      max-width: 580px;
+      margin: 28px 0 0;
+      color: var(--muted);
+      font-size: clamp(1.05rem, 2vw, 1.25rem);
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 34px;
+    }
+    .button {
+      display: inline-flex;
+      min-height: 48px;
+      align-items: center;
+      justify-content: center;
+      padding: 12px 22px;
+      border: 1px solid var(--accent);
+      border-radius: 999px;
+      font-weight: 650;
+      text-decoration: none;
+    }
+    .button-primary {
+      color: #fff;
+      background: var(--accent);
+    }
+    .button-primary:hover { background: #1d4e37; }
+    .button-secondary:hover { background: var(--accent-soft); }
+
+    .profile-card {
+      position: relative;
+      padding: 32px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: 0 24px 70px rgba(23, 37, 30, 0.08);
+    }
+    .profile-card::after {
+      position: absolute;
+      right: -70px;
+      bottom: -90px;
+      width: 210px;
+      height: 210px;
+      border-radius: 50%;
+      background: var(--accent-soft);
+      content: "";
+      z-index: 0;
+    }
+    .profile-card > * { position: relative; z-index: 1; }
+    .avatar {
+      display: grid;
+      width: 112px;
+      height: 112px;
+      margin-bottom: 28px;
+      place-items: center;
+      border-radius: 32px;
+      color: #fff;
+      background: var(--ink);
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: -0.04em;
+    }
+    .card-label {
+      margin: 0 0 6px;
+      color: var(--muted);
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+    .profile-card h2 {
+      margin: 0;
+      font-size: 1.65rem;
+      letter-spacing: -0.035em;
+      line-height: 1.2;
+    }
+    .card-text { color: var(--muted); }
+    .facts {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin: 26px 0 0;
+      padding-top: 22px;
+      border-top: 1px solid var(--line);
+    }
+    .facts dt { color: var(--muted); font-size: 0.85rem; }
+    .facts dd { margin: 2px 0 0; font-weight: 700; }
+
+    .section { padding-block: 76px; border-top: 1px solid var(--line); }
+    .section-heading {
+      display: grid;
+      grid-template-columns: 0.6fr 1.4fr;
+      gap: 32px;
+      margin-bottom: 36px;
+    }
+    .section-heading h2 {
+      margin: 0;
+      font-size: clamp(2rem, 4vw, 3.2rem);
+      letter-spacing: -0.05em;
+      line-height: 1.08;
+    }
+    .section-heading p { margin: 0; color: var(--muted); }
+    .services {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+    }
+    .service {
+      padding: 28px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.5);
+    }
+    .service-number { color: var(--accent); font-size: 0.85rem; font-weight: 700; }
+    .service h3 { margin: 34px 0 10px; font-size: 1.2rem; }
+    .service p { margin: 0; color: var(--muted); font-size: 0.96rem; }
+
+    .about {
+      display: grid;
+      grid-template-columns: 0.8fr 1.2fr;
+      gap: 64px;
+      align-items: start;
+    }
+    .about h2 {
+      margin: 0;
+      font-size: clamp(2rem, 4vw, 3.2rem);
+      letter-spacing: -0.05em;
+      line-height: 1.08;
+    }
+    .about-text p { margin-top: 0; color: var(--muted); font-size: 1.08rem; }
+    .about-text p:last-child { margin-bottom: 0; }
+
+    .contact {
+      margin-block: 32px 72px;
+      padding: clamp(32px, 6vw, 64px);
+      border-radius: var(--radius);
+      color: #fff;
+      background: var(--ink);
+    }
+    .contact .card-label { color: #b8c7bd; }
+    .contact h2 {
+      max-width: 720px;
+      margin: 10px 0 18px;
+      font-size: clamp(2.2rem, 5vw, 4.2rem);
+      letter-spacing: -0.055em;
+      line-height: 1.05;
+    }
+    .contact p { max-width: 580px; color: #c7d1ca; }
+    .contact .button {
+      margin-top: 18px;
+      border-color: #fff;
+      color: var(--ink);
+      background: #fff;
+    }
+    .contact .button:hover { background: var(--accent-soft); }
+    .contact-email {
+      display: inline-block;
+      margin-left: 20px;
+      color: #fff;
+      text-underline-offset: 4px;
+    }
+
+    .site-footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      padding-block: 0 32px;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+    .site-footer p { margin: 0; }
+    .site-footer a { text-underline-offset: 4px; }
+
+    @media (max-width: 800px) {
+      .hero { grid-template-columns: 1fr; gap: 44px; min-height: auto; }
+      .profile-card { max-width: 540px; }
+      .section-heading, .about { grid-template-columns: 1fr; gap: 18px; }
+      .services { grid-template-columns: 1fr; }
+      .service h3 { margin-top: 16px; }
+    }
+    @media (max-width: 560px) {
+      .container { width: min(100% - 28px, 1120px); }
+      .site-header { align-items: flex-start; padding-block: 20px; }
+      .brand-text { display: none; }
+      .nav { gap: 14px; justify-content: flex-end; }
+      .nav a { font-size: 0.86rem; }
+      .hero { padding-block: 48px 64px; }
+      h1 { font-size: clamp(3rem, 17vw, 5rem); }
+      .profile-card { padding: 24px; }
+      .section { padding-block: 56px; }
+      .contact-email { display: block; margin: 18px 0 0; }
+      .site-footer { flex-direction: column; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+    }
+  </style>
+</head>
+<body id="top">
+  <a class="skip-link" href="#main">Перейти к содержанию</a>
+
+  <header class="site-header container">
+    <a class="brand" href="#top" aria-label="Анна Смирнова — на главную">
+      <span class="brand-mark" aria-hidden="true">АС</span>
+      <span class="brand-text">Анна Смирнова</span>
+    </a>
+    <nav class="nav" aria-label="Основная навигация">
+      <a href="#services">Услуги</a>
+      <a href="#about">Обо мне</a>
+      <a href="#contact">Контакты</a>
+    </nav>
+  </header>
+
+  <main id="main" class="container">
+    <section class="hero" aria-labelledby="hero-title">
+      <div>
+        <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span>Открыта для новых проектов</p>
+        <h1 id="hero-title">Анна<br>Смирнова</h1>
+        <p class="lead">Продуктовый дизайнер. Превращаю сложные идеи в понятные интерфейсы, которые удобно использовать и легко развивать.</p>
+        <div class="actions">
+          <a class="button button-primary" href="#contact">Обсудить проект</a>
+          <a class="button button-secondary" href="#services">Смотреть услуги</a>
+        </div>
+      </div>
+
+      <aside class="profile-card" aria-label="Краткая информация">
+        <div class="avatar" aria-hidden="true">АС</div>
+        <p class="card-label">Мой подход</p>
+        <h2>Смысл сначала.<br>Декорации потом.</h2>
+        <p class="card-text">Изучаю задачу, проектирую сценарии и проверяю решения вместе с командой.</p>
+        <dl class="facts">
+          <div><dt>Опыт</dt><dd>5 лет</dd></div>
+          <div><dt>Формат</dt><dd>Удалённо</dd></div>
+        </dl>
+      </aside>
+    </section>
+
+    <section id="services" class="section" aria-labelledby="services-title">
+      <div class="section-heading">
+        <h2 id="services-title">Чем могу помочь</h2>
+        <p>Подключаюсь к отдельной задаче или сопровождаю продукт от первой гипотезы до готового макета.</p>
+      </div>
+      <div class="services">
+        <article class="service">
+          <span class="service-number">01</span>
+          <h3>Исследование</h3>
+          <p>Разбираюсь в аудитории и процессах, нахожу проблемные места и формулирую гипотезы.</p>
+        </article>
+        <article class="service">
+          <span class="service-number">02</span>
+          <h3>UX/UI-дизайн</h3>
+          <p>Проектирую пользовательские сценарии, прототипы и интерфейсы для сайтов и приложений.</p>
+        </article>
+        <article class="service">
+          <span class="service-number">03</span>
+          <h3>Дизайн-системы</h3>
+          <p>Собираю библиотеку компонентов и правил, чтобы продукт выглядел целостно и развивался быстрее.</p>
+        </article>
+      </div>
+    </section>
+
+    <section id="about" class="section about" aria-labelledby="about-title">
+      <h2 id="about-title">Немного обо мне</h2>
+      <div class="about-text">
+        <p>Я работаю на стыке дизайна и аналитики. Мне важно не просто сделать красивый экран, а понять, какое решение поможет человеку и бизнесу достичь результата.</p>
+        <p>Люблю прозрачные процессы, аккуратную документацию и тесную работу с разработчиками. Говорю на языке задач, а не только макетов.</p>
+      </div>
+    </section>
+
+    <section id="contact" class="contact" aria-labelledby="contact-title">
+      <p class="card-label">Контакты</p>
+      <h2 id="contact-title">Есть идея?<br>Давайте обсудим.</h2>
+      <p>Расскажите о задаче, сроках и команде. Я отвечу и предложу следующий шаг.</p>
+      <a class="button" href="mailto:hello@example.com">Написать Анне</a>
+      <a class="contact-email" href="mailto:hello@example.com">hello@example.com</a>
+    </section>
+  </main>
+
+  <footer class="site-footer container">
+    <p>Демо-визитка. Имя, сведения и контакты вымышлены.</p>
+    <a href="#top">Наверх ↑</a>
+  </footer>
+</body>
+</html>
