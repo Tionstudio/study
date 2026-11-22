@@ -106,7 +106,7 @@ public class AgentV2Session {
      * When false, the session behaves as a plain chat: no tools in the
      * system prompt and no tool-call parsing — every reply is a final answer.
      */
-    private volatile boolean toolsEnabled = true;
+    private volatile boolean toolsEnabled = false;
     /** "summary" mode: last N user/assistant messages stay as-is. */
     private int summaryKeep = 5;
     /** "summary" mode: the summary is regenerated every M new messages. */
@@ -194,8 +194,10 @@ public class AgentV2Session {
     public ObjectNode memorySnapshot() {
         ObjectNode root = MAPPER.createObjectNode();
         root.put("systemPrompt", AgentProtocol.systemPrompt(toolsEnabled));
-        root.set("longTerm", dialogStore.agentConfig());
-        root.set("ruleCandidates", dialogStore.ruleCandidates(true));
+        root.set("longTerm", dialogStore.dialogAgentConfig(id));
+        root.put("profileId", dialogStore.dialogProfileId(id));
+        root.put("historyEmpty", dialogStore.loadEntries(id, "history").isEmpty());
+        root.set("ruleCandidates", dialogStore.ruleCandidates(true, id));
         root.set("working", dialogStore.working(id));
         ArrayNode factArray = root.putArray("facts");
         for (AgentProtocol.Fact f : dialogStore.listFacts(id)) {
@@ -1116,7 +1118,7 @@ public class AgentV2Session {
         List<LlmClient.Message> messages = new ArrayList<>(window.size() + 4);
         String system = AgentProtocol.systemPrompt(toolsEnabled);
         String longTerm = "[LONG-TERM — конфиг агента, передаётся целиком]\n"
-                + dialogStore.agentConfig().toString();
+                + dialogStore.dialogAgentConfig(id).toString();
         ObjectNode working = dialogStore.working(id);
         String workingText = working.isEmpty() ? "" : "[WORKING — активная задача]\n" + working.toString();
         messages.add(new LlmClient.Message("system", system));
@@ -1653,7 +1655,7 @@ public class AgentV2Session {
 
     /** One-time initial adaptation; never overwrites the configuration directly. */
     private LlmClient.ChatResult bootstrapLongTermIfNeeded(Listener listener) throws IOException {
-        if ("true".equals(dialogStore.state("lt_bootstrap_completed"))) return null;
+        if ("true".equals(dialogStore.state("lt_bootstrap_completed:" + id))) return null;
         StringBuilder messages = new StringBuilder();
         int userMessages = 0;
         for (Entry entry : history) {
@@ -1677,7 +1679,7 @@ public class AgentV2Session {
                 Первые сообщения: %s
                 Факты: %s
                 Текущий LT: %s
-                """.formatted(messages.toString(), facts.toString(), dialogStore.agentConfig().toString());
+                """.formatted(messages.toString(), facts.toString(), dialogStore.dialogAgentConfig(id).toString());
         LlmClient.ChatResult result = callLlm(List.of(new LlmClient.Message("user", prompt)),
                 listener, false, "lt_bootstrap");
         if (result == null || result.reply() == null || result.reply().isBlank()) return result;
@@ -1685,7 +1687,7 @@ public class AgentV2Session {
             String text = result.reply().trim()
                     .replaceFirst("^```(?:json)?\\s*", "").replaceFirst("```$", "").trim();
             JsonNode parsed = MAPPER.readTree(text);
-            ObjectNode config = dialogStore.agentConfig();
+            ObjectNode config = dialogStore.dialogAgentConfig(id);
             for (JsonNode candidate : parsed.path("candidates")) {
                 String operation = candidate.path("operation").asText("add");
                 String target = candidate.path("ruleId").asText("").trim();
@@ -1706,7 +1708,7 @@ public class AgentV2Session {
                 dialogStore.observeRuleCandidate(key, rule, candidate.path("sourceFact").asText(""), id,
                         operation, target, candidate.path("oldText").asText(""), "bootstrap");
             }
-            dialogStore.setState("lt_bootstrap_completed", "true");
+            dialogStore.setState("lt_bootstrap_completed:" + id, "true");
             listener.on("memory", memorySnapshot());
         } catch (Exception e) {
             LOG.warning("Agent session " + id + ": invalid LT bootstrap: "
@@ -1734,7 +1736,7 @@ public class AgentV2Session {
 
                 Новые факты: %s
                 Существующие правила LT: %s
-                """.formatted(factsJson.toString(), dialogStore.agentConfig().toString());
+                """.formatted(factsJson.toString(), dialogStore.dialogAgentConfig(id).toString());
         LlmClient.ChatResult result = callLlm(List.of(new LlmClient.Message("user", prompt)),
                 listener, false, "lt_candidates");
         if (result == null || result.reply() == null || result.reply().isBlank()) return result;

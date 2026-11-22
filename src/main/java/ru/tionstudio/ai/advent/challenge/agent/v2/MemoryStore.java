@@ -139,17 +139,67 @@ public class MemoryStore {
                         value TEXT
                     )
                     """);
+            st.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS v2_profiles (
+                        id TEXT PRIMARY KEY,
+                        name TEXT NOT NULL UNIQUE,
+                        rules_json TEXT NOT NULL,
+                        is_builtin INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    )
+                    """);
+            ensureDialogProfileColumns(c, st);
             st.executeUpdate("INSERT OR IGNORE INTO v2_agent_config(id, content) VALUES (1, '{\"rules\":[]}')");
             if (state("lt_initialized") == null) {
                 if (agentConfig().path("rules").isEmpty()) saveAgentConfig(defaultAgentConfig().toString());
                 setState("lt_initialized", "true");
             }
+            insertBuiltinProfiles(c);
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to initialize agent v2 database", e);
         }
     }
 
     /** Adds reasoning storage to databases created by earlier v2 versions. */
+    private static void ensureDialogProfileColumns(Connection c, Statement st) throws SQLException {
+        java.util.Set<String> columns = new java.util.HashSet<>();
+        try (ResultSet rs = st.executeQuery("PRAGMA table_info(v2_dialogs)")) {
+            while (rs.next()) columns.add(rs.getString("name").toLowerCase());
+        }
+        if (!columns.contains("profile_id")) st.executeUpdate("ALTER TABLE v2_dialogs ADD COLUMN profile_id TEXT NOT NULL DEFAULT ''");
+        if (!columns.contains("lt_config")) st.executeUpdate("ALTER TABLE v2_dialogs ADD COLUMN lt_config TEXT NOT NULL DEFAULT ''");
+    }
+
+    private static void insertBuiltinProfiles(Connection c) throws SQLException {
+        insertBuiltinProfile(c, "brief-plain", "Краткий, без кода", new String[][]{
+                {"default-clarity", "behavior", "Отвечай кратко, давая только основной вывод и необходимые пояснения"},
+                {"default-code", "output_format", "Не приводи код без явного запроса"},
+                {"default-tone", "behavior", "Используй неформальный и дружелюбный тон"}});
+        insertBuiltinProfile(c, "detailed-code", "Подробный, с кодом", new String[][]{
+                {"default-clarity", "behavior", "Давай подробные структурированные объяснения"},
+                {"default-code", "output_format", "Приводи примеры кода, когда они помогают понять решение"},
+                {"default-alternatives", "behavior", "Поясняй принципы и альтернативные решения"}});
+        insertBuiltinProfile(c, "formal-technical", "Формальный технический", new String[][]{
+                {"default-tone", "behavior", "Используй формальный и технически точный стиль"},
+                {"default-code", "output_format", "Приводи код только по явному запросу"},
+                {"default-evidence", "behavior", "Отделяй факты, предположения и рекомендации"}});
+    }
+
+    private static void insertBuiltinProfile(Connection c, String id, String name, String[][] definitions)
+            throws SQLException {
+        ArrayNode rules = MAPPER.createArrayNode();
+        for (String[] definition : definitions) {
+            ObjectNode rule = rules.addObject();
+            rule.put("id", definition[0]); rule.put("type", definition[1]);
+            rule.put("text", definition[2]); rule.put("enabled", true); rule.put("source", "builtin");
+        }
+        try (PreparedStatement ps = c.prepareStatement(
+                "INSERT OR IGNORE INTO v2_profiles(id, name, rules_json, is_builtin) VALUES(?, ?, ?, 1)")) {
+            ps.setString(1, id); ps.setString(2, name); ps.setString(3, rules.toString()); ps.executeUpdate();
+        }
+    }
+
     private static void ensureRuleCandidateColumns(Connection c, Statement st) throws SQLException {
         java.util.Set<String> columns = new java.util.HashSet<>();
         try (ResultSet rs = st.executeQuery("PRAGMA table_info(v2_rule_candidates)")) {
@@ -183,11 +233,17 @@ public class MemoryStore {
     // ----- dialogs and transcript -----
 
     public synchronized void createDialog(String id, String title) {
+        createDialog(id, title, "");
+    }
+
+    public synchronized void createDialog(String id, String title, String profileId) {
         try (Connection c = connect(); PreparedStatement ps = c.prepareStatement(
-                "INSERT OR IGNORE INTO v2_dialogs(id, title) VALUES(?, ?)")) {
+                "INSERT OR IGNORE INTO v2_dialogs(id, title, lt_config) VALUES(?, ?, ?)")) {
             ps.setString(1, id);
             ps.setString(2, title == null || title.isBlank() ? "Диалог" : title);
+            ps.setString(3, agentConfig().toString());
             ps.executeUpdate();
+            if (profileId != null && !profileId.isBlank()) applyProfile(id, profileId);
             setCurrentDialog(id);
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to create v2 dialog " + id, e);
@@ -458,10 +514,81 @@ public class MemoryStore {
         executeUpdate("UPDATE v2_agent_config SET content = ?, updated_at = datetime('now') WHERE id = 1", content);
     }
 
+    public synchronized ObjectNode dialogAgentConfig(String dialogId) {
+        String raw;
+        try (Connection c = connect(); PreparedStatement ps = c.prepareStatement(
+                "SELECT lt_config FROM v2_dialogs WHERE id = ?")) {
+            ps.setString(1, dialogId);
+            try (ResultSet rs = ps.executeQuery()) {
+                raw = rs.next() ? rs.getString(1) : "";
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to load dialog LT config " + dialogId, e);
+        }
+        try {
+            if (raw == null || raw.isBlank()) {
+                ObjectNode inherited = agentConfig();
+                saveDialogAgentConfig(dialogId, inherited.toString());
+                return inherited;
+            }
+            JsonNode parsed = MAPPER.readTree(raw);
+            if (parsed == null || !parsed.isObject()) throw new IllegalArgumentException("Invalid dialog LT config");
+            return (ObjectNode) parsed;
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to load dialog LT config " + dialogId, e);
+        }
+    }
+
+    public synchronized void saveDialogAgentConfig(String dialogId, String content) {
+        executeUpdate("UPDATE v2_dialogs SET lt_config = ?, updated_at = datetime('now') WHERE id = ?", content, dialogId);
+    }
+
+    public synchronized ArrayNode profiles() {
+        ArrayNode result = MAPPER.createArrayNode();
+        try (Connection c = connect(); Statement st = c.createStatement(); ResultSet rs = st.executeQuery(
+                "SELECT id, name, rules_json, is_builtin FROM v2_profiles ORDER BY is_builtin DESC, name")) {
+            while (rs.next()) {
+                ObjectNode item = result.addObject();
+                item.put("id", rs.getString(1)); item.put("name", rs.getString(2));
+                item.set("rules", readJson(rs.getString(3))); item.put("builtin", rs.getInt(4) == 1);
+            }
+            return result;
+        } catch (SQLException e) { throw new IllegalStateException("Failed to load profiles", e); }
+    }
+
+    public synchronized ObjectNode profile(String id) {
+        for (JsonNode item : profiles()) if (id.equals(item.path("id").asText())) return (ObjectNode) item;
+        return null;
+    }
+
+    public synchronized void saveProfile(String id, String name, String rulesJson, boolean builtin) {
+        executeUpdate("""
+                INSERT INTO v2_profiles(id, name, rules_json, is_builtin) VALUES(?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET name = excluded.name, rules_json = excluded.rules_json,
+                    updated_at = datetime('now')
+                """, id, name, rulesJson, builtin ? "1" : "0");
+    }
+
+    public synchronized void deleteProfile(String id) { executeUpdate("DELETE FROM v2_profiles WHERE id = ? AND is_builtin = 0", id); }
+
+    public synchronized void applyProfile(String dialogId, String profileId) {
+        ObjectNode profile = profile(profileId);
+        if (profile == null) throw new IllegalArgumentException("Profile not found");
+        executeUpdate("UPDATE v2_dialogs SET profile_id = ?, lt_config = ?, updated_at = datetime('now') WHERE id = ?",
+                profileId, MAPPER.createObjectNode().set("rules", profile.get("rules")).toString(), dialogId);
+    }
+
+    public synchronized String dialogProfileId(String dialogId) {
+        try (Connection c = connect(); PreparedStatement ps = c.prepareStatement("SELECT profile_id FROM v2_dialogs WHERE id = ?")) {
+            ps.setString(1, dialogId); try (ResultSet rs = ps.executeQuery()) { return rs.next() ? rs.getString(1) : ""; }
+        } catch (SQLException e) { throw new IllegalStateException("Failed to load dialog profile", e); }
+    }
+
     /** Records another observation of a preference; approved/rejected keys never reappear. */
     public synchronized void observeRuleCandidate(String key, String text, String sourceFact,
                                                    String dialogId, String operation,
                                                    String targetRuleId, String baseText, String origin) {
+        String scopedKey = (dialogId == null || dialogId.isBlank() ? "global" : dialogId) + ":" + key;
         executeUpdate("""
                 INSERT INTO v2_rule_candidates(candidate_key, rule_text, source_fact, source_dialog,
                     operation, target_rule_id, base_text, origin)
@@ -478,29 +605,37 @@ public class MemoryStore {
                     occurrences = CASE WHEN v2_rule_candidates.status = 'pending'
                         THEN v2_rule_candidates.occurrences + 1 ELSE v2_rule_candidates.occurrences END,
                     updated_at = datetime('now')
-                """, key, text, sourceFact, dialogId, operation, targetRuleId, baseText, origin);
+                """, scopedKey, text, sourceFact, dialogId, operation, targetRuleId, baseText, origin);
     }
 
     public synchronized ArrayNode ruleCandidates(boolean readyOnly) {
+        return ruleCandidates(readyOnly, null);
+    }
+
+    public synchronized ArrayNode ruleCandidates(boolean readyOnly, String dialogId) {
         ArrayNode result = MAPPER.createArrayNode();
         String sql = "SELECT id, candidate_key, rule_text, source_fact, source_dialog, occurrences, "
                 + "operation, target_rule_id, base_text, origin FROM v2_rule_candidates WHERE status = 'pending'"
-                + (readyOnly ? " AND (occurrences >= 2 OR origin = 'bootstrap')" : "") + " ORDER BY updated_at DESC";
-        try (Connection c = connect(); Statement st = c.createStatement(); ResultSet rs = st.executeQuery(sql)) {
-            while (rs.next()) {
-                ObjectNode item = result.addObject();
-                item.put("id", rs.getLong(1));
-                item.put("key", rs.getString(2));
-                item.put("text", rs.getString(3));
-                item.put("sourceFact", rs.getString(4));
-                item.put("sourceDialog", rs.getString(5));
-                item.put("occurrences", rs.getInt(6));
-                item.put("operation", rs.getString(7));
-                item.put("targetRuleId", rs.getString(8));
-                item.put("baseText", rs.getString(9));
-                item.put("origin", rs.getString(10));
+                + (readyOnly ? " AND (occurrences >= 2 OR origin = 'bootstrap')" : "")
+                + (dialogId == null ? "" : " AND source_dialog = ?") + " ORDER BY updated_at DESC";
+        try (Connection c = connect(); PreparedStatement ps = c.prepareStatement(sql)) {
+            if (dialogId != null) ps.setString(1, dialogId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    ObjectNode item = result.addObject();
+                    item.put("id", rs.getLong(1));
+                    item.put("key", rs.getString(2));
+                    item.put("text", rs.getString(3));
+                    item.put("sourceFact", rs.getString(4));
+                    item.put("sourceDialog", rs.getString(5));
+                    item.put("occurrences", rs.getInt(6));
+                    item.put("operation", rs.getString(7));
+                    item.put("targetRuleId", rs.getString(8));
+                    item.put("baseText", rs.getString(9));
+                    item.put("origin", rs.getString(10));
+                }
+                return result;
             }
-            return result;
         } catch (SQLException e) {
             throw new IllegalStateException("Failed to load LT rule candidates", e);
         }
@@ -668,6 +803,11 @@ public class MemoryStore {
                 st.executeUpdate("DELETE FROM v2_working");
                 st.executeUpdate("DELETE FROM v2_rule_candidates");
                 try (PreparedStatement ps = c.prepareStatement(
+                        "UPDATE v2_dialogs SET lt_config = ?, profile_id = ''")) {
+                    ps.setString(1, defaultAgentConfig().toString());
+                    ps.executeUpdate();
+                }
+                try (PreparedStatement ps = c.prepareStatement(
                         "UPDATE v2_agent_config SET content = ?, updated_at = datetime('now') WHERE id = 1")) {
                     ps.setString(1, defaultAgentConfig().toString());
                     ps.executeUpdate();
@@ -680,7 +820,7 @@ public class MemoryStore {
                 c.setAutoCommit(true);
             }
             setState("lt_initialized", "true");
-            setState("lt_bootstrap_completed", "false");
+            executeUpdate("DELETE FROM v2_state WHERE key = 'lt_bootstrap_completed' OR key LIKE 'lt_bootstrap_completed:%'");
             logAction(null, "reset_all", "{}");
         } catch (Exception e) {
             throw new IllegalStateException("Failed to reset v2 memory", e);

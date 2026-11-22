@@ -134,6 +134,9 @@
         .memory-section > summary { padding: 9px 11px; cursor: pointer; font-weight: 600; background: var(--bg); }
         .memory-body { padding: 10px; display: flex; flex-direction: column; gap: 8px; }
         .memory-body pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 var(--code); max-height: 260px; overflow-y: auto; }
+        #systemPrompt { overflow-y: scroll; scrollbar-width: thin; scrollbar-gutter: stable; scrollbar-color: var(--line) transparent; }
+        #shortTermSection > .memory-body { max-height: 480px; overflow-y: auto; scrollbar-width: thin; scrollbar-gutter: stable; scrollbar-color: var(--line) transparent; }
+        #llmLog, #actionLog { max-height: 360px; overflow-y: auto; scrollbar-width: thin; scrollbar-gutter: stable; scrollbar-color: var(--line) transparent; }
         .memory-body textarea { min-height: 110px; resize: vertical; font: 12px/1.5 var(--code); }
         .row-actions { display: flex; gap: 7px; flex-wrap: wrap; }
         .st-block { padding: 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
@@ -170,8 +173,19 @@
         .rule-candidate textarea { grid-column: 1 / -1; min-height: 54px; font: 12px/1.4 inherit; }
         .rule-candidate .row-actions { flex-wrap: nowrap; }
         .rule-candidate-meta { grid-column: 1 / -1; color: var(--muted); font-size: 11px; }
-        .lt-actions { display: flex; align-items: center; gap: 12px; margin-top: 7px; }
+        .lt-actions { display: flex; align-items: center; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
         .lt-actions details { margin-left: auto; }
+        dialog { width: min(680px, calc(100vw - 32px)); max-height: 85dvh; padding: 0; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); }
+        dialog::backdrop { background: rgb(20 28 35 / 35%); }
+        .profile-dialog-head { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+        .profile-dialog-head h3 { margin: 0; font-size: 16px; }
+        .profile-dialog-body { padding: 14px 16px; overflow-y: auto; }
+        .profile-picker { display: flex; gap: 8px; margin-bottom: 12px; }
+        .profile-picker select { flex: 1; }
+        .profile-name { margin-bottom: 10px; }
+        .profile-name input { width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); }
+        .profile-editor-actions { display: flex; align-items: center; gap: 7px; margin-top: 10px; flex-wrap: wrap; }
+        .profile-editor-hint { margin-left: auto; color: var(--muted); font-size: 11px; }
         .log-item { border-bottom: 1px solid var(--line); }
         .log-item:last-child { border-bottom: 0; }
         .log-item summary { padding: 8px 4px; cursor: pointer; font: 11px var(--code); }
@@ -220,6 +234,7 @@
                     <div class="settings-grid">
                         <div class="control"><label for="mainModel">Основная модель</label><select id="mainModel"></select></div>
                         <div class="control"><label for="analysisModel">Модель анализа</label><select id="analysisModel"></select></div>
+                        <div class="control"><label for="profileSelect">Профиль агента · до первого сообщения</label><div class="input-row"><select id="profileSelect" title="Выберите начальные правила Long-term"></select><button id="applyProfile" class="btn small" type="button" title="Применить выбранный профиль к пустому диалогу">Применить</button></div></div>
                         <div class="control"><label for="compression">Сжатие short-term</label>
                             <select id="compression">
                                 <option value="none">Без сжатия</option><option value="lastN">Последние N сообщений</option>
@@ -270,7 +285,7 @@
             <div id="layerChips" class="chips"></div>
             <details class="memory-section"><summary>Системный промпт</summary><div class="memory-body"><pre id="systemPrompt"></pre></div></details>
 
-            <details class="memory-section" open><summary>Short-term — текущий диалог</summary><div class="memory-body">
+            <details id="shortTermSection" class="memory-section" open><summary>Short-term — текущий диалог</summary><div class="memory-body">
                 <div id="stMeta" class="chips"></div>
                 <section class="st-block" aria-label="Сводка диалога">
                     <div class="st-section-head"><strong>Сводка диалога</strong></div>
@@ -296,7 +311,7 @@
             <details class="memory-section" open><summary>Long-term — конфиг агента</summary><div class="memory-body">
                 <div id="ruleCandidates" class="rule-candidates"></div>
                 <div id="rulesList" class="rules-list"></div>
-                <div class="lt-actions"><button id="addRule" class="btn small" type="button">＋ Добавить</button><button id="clearLt" class="btn small danger" type="button">Очистить LT</button>
+                <div class="lt-actions"><button id="addRule" class="btn small" type="button">＋ Добавить</button><button id="saveProfileAs" class="btn small" type="button">Сохранить как…</button><button id="manageProfiles" class="btn small" type="button">Профили</button><button id="clearLt" class="btn small danger" type="button">Очистить LT</button>
                 <details><summary>{ } JSON</summary><textarea id="ltEditor" aria-label="Исходный JSON конфига агента"></textarea><button id="applyLtJson" class="btn small" type="button">Применить JSON</button></details></div>
             </div></details>
 
@@ -305,6 +320,17 @@
         </aside>
     </div>
 </div>
+
+<dialog id="profileDialog" aria-labelledby="profileDialogTitle">
+    <div class="profile-dialog-head"><h3 id="profileDialogTitle">Профили Long-term</h3><button id="closeProfiles" class="btn small" type="button" aria-label="Закрыть">×</button></div>
+    <div class="profile-dialog-body">
+        <div class="profile-picker"><select id="profileEditorSelect" aria-label="Профиль для редактирования"></select><button id="newProfile" class="btn small" type="button">Новый</button></div>
+        <div class="profile-name"><input id="profileName" maxlength="80" placeholder="Название профиля" aria-label="Название профиля"></div>
+        <div id="profileRulesList" class="rules-list"></div>
+        <div class="profile-editor-actions"><button id="addProfileRule" class="btn small" type="button">＋ Правило</button><button id="saveProfile" class="btn small primary" type="button">Сохранить</button><button id="deleteProfile" class="btn small danger" type="button">Удалить</button><span class="profile-editor-hint">Двойной клик — изменить</span></div>
+        <div id="profileStatus" class="status" role="status"></div>
+    </div>
+</dialog>
 
 <script>
     const $ = id => document.getElementById(id);
@@ -317,6 +343,9 @@
     let scriptPauseRequested = false;
     let scriptPauseResume = null;
     let currentMemory = {};
+    let profiles = [];
+    let editingProfileId = '';
+    let profileRules = [];
     let scriptData = null;
     let scriptDialogIds = [];
     let lastScriptResults = [];
@@ -546,7 +575,7 @@
         };
         try {
             const response = await fetch('/api/v2/agent/chat', {method:'POST', headers:{'Content-Type':'application/json'},
-                body:JSON.stringify({...settingsPayload(overrides), message:text, sessionId:overrides.sessionId || sessionId || ''})});
+                body:JSON.stringify({...settingsPayload(overrides), message:text, sessionId:overrides.sessionId || sessionId || '', profileId:overrides.profileId || $('profileSelect').value})});
             if (!response.ok || !response.body) {
                 const err = await response.text(); throw new Error(err || ('HTTP ' + response.status));
             }
@@ -754,6 +783,10 @@
         renderRuleCandidates(memory.ruleCandidates || []);
         renderRules(memory.longTerm?.rules || []);
         $('ltEditor').value = JSON.stringify(memory.longTerm || {rules:[]}, null, 2);
+        if (profiles.length) renderProfileOptions(memory.profileId || $('profileSelect').value);
+        const profileLocked = Boolean(sessionId) && (memory.historyEmpty === false || (memory.historyMessages || 0) > 0);
+        $('profileSelect').disabled = profileLocked;
+        $('applyProfile').disabled = profileLocked || !$('profileSelect').value;
     }
     function factsFromEditor() {
         return ($('factsList')._facts || []).map(f => ({...f}));
@@ -924,6 +957,131 @@
             text:(el.querySelector('.rule-editor')?.value ?? el._rule.text ?? '').trim()}));
     }
     function syncLtEditorFromRules() { $('ltEditor').value = JSON.stringify({rules:rulesFromEditor()}, null, 2); }
+
+    function profileById(id) { return profiles.find(profile => profile.id === id); }
+    function renderProfileOptions(selectedId) {
+        const select = $('profileSelect');
+        select.innerHTML = profiles.map(profile => '<option value="' + escapeHtml(profile.id) + '">' + escapeHtml(profile.name) + '</option>').join('');
+        const selected = selectedId || select.value || localStorage.getItem('agentV2ProfileId') || profiles[0]?.id || '';
+        if (profileById(selected)) select.value = selected;
+        const locked = Boolean(sessionId) && currentMemory.historyEmpty === false;
+        select.disabled = locked;
+        $('applyProfile').disabled = locked || !select.value;
+    }
+    async function loadProfiles(selectedId) {
+        const response = await fetch('/api/v2/agent/profiles');
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Не удалось загрузить профили.');
+        profiles = data.profiles || [];
+        renderProfileOptions(selectedId);
+        renderProfileEditorOptions();
+        return profiles;
+    }
+    async function applySelectedProfile() {
+        const profileId = $('profileSelect').value;
+        if (!profileId) return;
+        localStorage.setItem('agentV2ProfileId', profileId);
+        if (!sessionId) { setStatus('Профиль выбран и будет использован в первом сообщении.'); return; }
+        if (currentMemory.historyEmpty === false) { setStatus('Профиль можно применить только до первого сообщения.', true); return; }
+        const response = await fetch('/api/v2/agent/dialog/profile', {method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({dialogId:sessionId, profileId})});
+        const data = await response.json();
+        if (!response.ok) { setStatus(data.error || 'Не удалось применить профиль.', true); renderProfileOptions(currentMemory.profileId); return; }
+        currentMemory = data.memory; renderMemory(currentMemory);
+        setStatus('Профиль применён: правила Long-term обновлены.');
+    }
+    function renderProfileEditorOptions() {
+        const select = $('profileEditorSelect');
+        if (!select) return;
+        select.innerHTML = profiles.map(profile => '<option value="' + escapeHtml(profile.id) + '">' + escapeHtml(profile.name) + (profile.builtin ? ' · встроенный' : '') + '</option>').join('');
+        if (editingProfileId && profileById(editingProfileId)) select.value = editingProfileId;
+    }
+    function selectProfileForEdit(id) {
+        const profile = profileById(id);
+        if (!profile) { editingProfileId = ''; $('profileName').value = ''; profileRules = []; }
+        else {
+            editingProfileId = profile.builtin ? '' : profile.id;
+            $('profileName').value = profile.name + (profile.builtin ? ' — копия' : '');
+            profileRules = (profile.rules || []).map(rule => ({...rule}));
+        }
+        renderProfileRules();
+        $('profileStatus').textContent = profile?.builtin ? 'Встроенный профиль сохраняется как новая копия.' : '';
+        $('deleteProfile').classList.toggle('hidden', !editingProfileId);
+    }
+    function openProfiles(copyCurrent = false) {
+        if (copyCurrent) {
+            editingProfileId = ''; $('profileName').value = '';
+            profileRules = rulesFromEditor(); renderProfileRules();
+            renderProfileEditorOptions(); $('deleteProfile').classList.add('hidden');
+            $('profileStatus').textContent = 'Сохраните текущий Long-term под новым названием.';
+        } else selectProfileForEdit($('profileSelect').value || profiles[0]?.id);
+        $('profileDialog').showModal();
+    }
+    function renderProfileRules() {
+        const list = $('profileRulesList'); list.innerHTML = '';
+        if (!profileRules.length) list.innerHTML = '<span class="status facts-empty">Добавьте хотя бы одно правило.</span>';
+        const icons = {role:'◉', behavior:'◈', output_format:'▤', tool_policy:'⚒', constraint:'⊘', preference:'♡', custom:'•'};
+        profileRules.forEach((rule, index) => {
+            const row = document.createElement('div'); row.className = 'rule' + (rule.enabled === false ? ' disabled' : '');
+            row.innerHTML = '<span class="rule-type-icon" role="button" tabindex="0" title="' + escapeHtml(rule.type || 'custom') + ' · клик: вкл./выкл.">' + (icons[rule.type] || '•') + '</span>'
+                + '<span class="rule-text" title="' + escapeHtml(rule.text || '') + ' — двойной клик для редактирования">' + escapeHtml(rule.text || '') + '</span>'
+                + '<button class="btn small danger delete-rule" type="button" title="Удалить">×</button>';
+            const toggle = () => { rule.enabled = rule.enabled === false; renderProfileRules(); };
+            row.querySelector('.rule-type-icon').onclick = toggle;
+            row.querySelector('.rule-type-icon').onkeydown = event => { if (event.key === 'Enter') toggle(); };
+            row.querySelector('.delete-rule').onclick = () => { profileRules.splice(index, 1); renderProfileRules(); };
+            row.querySelector('.rule-text').ondblclick = () => editProfileRule(index);
+            list.appendChild(row);
+        });
+    }
+    function editProfileRule(index) {
+        const list = $('profileRulesList');
+        if (list.querySelector('.editing')) return;
+        const row = list.querySelectorAll('.rule')[index]; const rule = profileRules[index];
+        if (!row || !rule) return;
+        row.classList.add('editing');
+        row.innerHTML = '<select class="rule-type" aria-label="Тип правила">'
+            + ['role','behavior','output_format','tool_policy','constraint','preference','custom'].map(type => '<option value="' + type + '"' + (type === rule.type ? ' selected' : '') + '>' + type + '</option>').join('')
+            + '</select><textarea class="rule-editor" aria-label="Текст правила">' + escapeHtml(rule.text || '') + '</textarea>';
+        const textarea = row.querySelector('textarea'); textarea.focus(); textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+        let finished = false;
+        const finish = save => {
+            if (finished) return; finished = true;
+            if (save) {
+                const text = textarea.value.trim();
+                if (!text) { finished = false; $('profileStatus').textContent = 'Текст правила не должен быть пустым. Esc — отмена.'; textarea.focus(); return; }
+                rule.type = row.querySelector('select').value; rule.text = text;
+            }
+            renderProfileRules();
+        };
+        textarea.onblur = () => finish(true);
+        textarea.onkeydown = event => {
+            if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); finish(true); }
+            if (event.key === 'Escape') { event.preventDefault(); finish(false); }
+        };
+    }
+    async function saveProfile() {
+        const name = $('profileName').value.trim();
+        if (!name) { $('profileStatus').textContent = 'Введите название профиля.'; return; }
+        if (!profileRules.length || profileRules.some(rule => !String(rule.text || '').trim())) { $('profileStatus').textContent = 'Добавьте и заполните правила.'; return; }
+        const response = await fetch('/api/v2/agent/profiles', {method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({id:editingProfileId || undefined, name, rules:profileRules})});
+        const data = await response.json();
+        if (!response.ok) { $('profileStatus').textContent = data.error || 'Не удалось сохранить профиль.'; return; }
+        profiles = data.profiles || []; editingProfileId = data.profileId;
+        renderProfileOptions(data.profileId); renderProfileEditorOptions();
+        $('profileStatus').textContent = 'Профиль сохранён.';
+        localStorage.setItem('agentV2ProfileId', data.profileId);
+    }
+    async function deleteSelectedProfile() {
+        if (!editingProfileId || !confirm('Удалить пользовательский профиль? Правила в существующих диалогах сохранятся.')) return;
+        const response = await fetch('/api/v2/agent/profiles?id=' + encodeURIComponent(editingProfileId), {method:'DELETE'});
+        const data = await response.json();
+        if (!response.ok) { $('profileStatus').textContent = data.error || 'Не удалось удалить профиль.'; return; }
+        profiles = data.profiles || []; editingProfileId = '';
+        renderProfileOptions(profiles[0]?.id); selectProfileForEdit(profiles[0]?.id);
+    }
+
     async function saveLayer(layer, payload) {
         if (!sessionId && layer !== 'lt') { setStatus('Сначала создайте задачу.', true); return false; }
         const query = '?layer=' + layer + (sessionId ? '&dialog=' + encodeURIComponent(sessionId) : '');
@@ -1027,7 +1185,7 @@
                 $('pauseBtn').classList.add('hidden'); $('abortBtn').classList.add('hidden');
                 $('pauseBtn').textContent = 'Пауза';
                 addMessage('Скрипт: ' + (dialog.name || 'Диалог'), 'note');
-                const overrides = {...(dialog.settings || {}), sessionId:null};
+                const overrides = {...(dialog.settings || {}), profileId:dialog.profileId || '', sessionId:null};
                 if (dialog.settings?.contextMessages || dialog.settings?.slidingMessages || dialog.settings?.stickyKeep || dialog.settings?.summaryKeep) {
                     overrides.windowSize = dialog.settings.contextMessages || dialog.settings.slidingMessages || dialog.settings.stickyKeep || dialog.settings.summaryKeep;
                 }
@@ -1110,13 +1268,17 @@
     $('pauseBtn').onclick = () => control(paused ? 'resume' : 'pause');
     $('abortBtn').onclick = () => control('abort');
     $('newTask').onclick = async () => {
-        const response = await fetch('/api/v2/agent/dialog/new', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
-        const data = await response.json(); sessionId = data.sessionId; chatEl.innerHTML = '<div class="empty">Новая задача. Short-term и working очищены, конфиг агента сохранён.</div>';
+        const profileId = $('profileSelect').value;
+        const response = await fetch('/api/v2/agent/dialog/new', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({profileId})});
+        const data = await response.json();
+        if (!response.ok) { setStatus(data.error || 'Не удалось создать задачу.', true); return; }
+        sessionId = data.sessionId; chatEl.innerHTML = '<div class="empty">Новая задача. Short-term и working очищены, конфиг агента взят из выбранного профиля.</div>';
         dialogStats = emptyDialogStats(); renderDialogStats();
         currentMemory = data.memory; renderMemory(currentMemory); scriptDialogIds = []; lastScriptResults = []; renderScriptResults();
+        localStorage.setItem('agentV2ProfileId', profileId);
     };
     $('resetAll').onclick = async () => {
-        if (!confirm('Сбросить ST/WT всех диалогов и глобальный LT? Транскрипты и журналы сохранятся.')) return;
+        if (!confirm('Сбросить ST/WT и LT всех диалогов? Транскрипты, журналы и профили сохранятся.')) return;
         const response = await fetch('/api/v2/agent/reset', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({confirm:true})});
         if (response.ok) { await refreshMemory(); setStatus('Все слои памяти очищены.'); } else setStatus(await response.text(), true);
     };
@@ -1144,6 +1306,20 @@
     $('clearSt').onclick = () => clearLayer('st'); $('clearWt').onclick = () => clearLayer('wt'); $('clearLt').onclick = () => clearLayer('lt');
     $('addRule').onclick = () => { const rules = rulesFromEditor(); rules.push({id:'rule-' + Date.now(), type:'behavior', text:'', enabled:true}); renderRules(rules); const rows=$('rulesList').querySelectorAll('.rule'); editRule(rows[rows.length-1]); };
     $('applyLtJson').onclick = () => { try { const data = JSON.parse($('ltEditor').value); if (!Array.isArray(data.rules)) throw new Error(); saveLayer('lt', {rules:data.rules}); } catch { setStatus('Нужен JSON с массивом rules.', true); } };
+    $('profileSelect').onchange = () => {
+        localStorage.setItem('agentV2ProfileId', $('profileSelect').value);
+        setStatus(sessionId ? 'Профиль выбран. Нажмите «Применить», чтобы обновить Long-term.' : 'Профиль будет использован в первом сообщении.');
+    };
+    $('applyProfile').onclick = () => applySelectedProfile().catch(error => setStatus(error.message, true));
+    $('saveProfileAs').onclick = () => openProfiles(true);
+    $('manageProfiles').onclick = () => openProfiles(false);
+    $('closeProfiles').onclick = () => $('profileDialog').close();
+    $('profileDialog').onclick = event => { if (event.target === $('profileDialog')) $('profileDialog').close(); };
+    $('profileEditorSelect').onchange = () => selectProfileForEdit($('profileEditorSelect').value);
+    $('newProfile').onclick = () => selectProfileForEdit('');
+    $('addProfileRule').onclick = () => { profileRules.push({id:'rule-' + Date.now(), type:'behavior', text:'Новое правило', enabled:true}); renderProfileRules(); editProfileRule(profileRules.length - 1); };
+    $('saveProfile').onclick = () => saveProfile().catch(error => $('profileStatus').textContent = error.message);
+    $('deleteProfile').onclick = () => deleteSelectedProfile().catch(error => $('profileStatus').textContent = error.message);
     $('refreshAll').onclick = () => Promise.all([refreshMemory(), refreshLlmLog(), refreshActionLog()]);
     $('refreshLlm').onclick = refreshLlmLog; $('refreshActions').onclick = refreshActionLog;
     $('runScript').onclick = runScript; $('analyzeDialog').onclick = () => analyze('dialog'); $('analyzeScript').onclick = () => analyze('script');
@@ -1167,7 +1343,9 @@
                 if (saved.compression === 'sticky') { $('compression').value = 'lastN'; $('stickyFacts').checked = true; }
             }
         } catch { /* defaults */ }
-        updateCompressionUi(); await restoreHistory();
+        updateCompressionUi();
+        await loadProfiles(localStorage.getItem('agentV2ProfileId') || '');
+        await restoreHistory();
     }
     init().catch(e => setStatus(e.message, true));
 </script>

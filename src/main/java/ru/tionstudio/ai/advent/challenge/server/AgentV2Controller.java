@@ -63,6 +63,8 @@ public class AgentV2Controller {
         server.createContext("/api/v2/agent/control", this::handleControl);
         server.createContext("/api/v2/agent/history", this::handleHistory);
         server.createContext("/api/v2/agent/dialog/new", this::handleNewDialog);
+        server.createContext("/api/v2/agent/dialog/profile", this::handleDialogProfile);
+        server.createContext("/api/v2/agent/profiles", this::handleProfiles);
         server.createContext("/api/v2/agent/memory", this::handleMemory);
         server.createContext("/api/v2/agent/rule-candidate", this::handleRuleCandidate);
         server.createContext("/api/v2/agent/reset", this::handleReset);
@@ -90,7 +92,7 @@ public class AgentV2Controller {
             sid = json.path("sessionId").asText("").trim();
             if (sid.isEmpty()) sid = UUID.randomUUID().toString();
             if (!store.dialogExists(sid)) {
-                store.createDialog(sid, abbreviate(message, 60));
+                store.createDialog(sid, abbreviate(message, 60), json.path("profileId").asText(""));
             } else {
                 store.setCurrentDialog(sid);
             }
@@ -281,14 +283,85 @@ public class AgentV2Controller {
             if (!requireMethod(exchange, "POST")) return;
             JsonNode body = readJson(exchange);
             String sid = UUID.randomUUID().toString();
-            store.createDialog(sid, body.path("title").asText("Диалог"));
-            store.logAction(sid, "new_task", "{}");
+            store.createDialog(sid, body.path("title").asText("Диалог"), body.path("profileId").asText(""));
+            store.logAction(sid, "new_task", MAPPER.createObjectNode()
+                    .put("profileId", body.path("profileId").asText("")).toString());
             ObjectNode response = MAPPER.createObjectNode();
             response.put("sessionId", sid);
             response.put("title", store.dialogTitle(sid));
             response.set("memory", sessionFor(sid, defaultClient).memorySnapshot());
             sendJson(exchange, 200, response.toString());
+        } catch (IllegalArgumentException e) {
+            sendQuietly(exchange, 400, errorJson(e.getMessage()));
         } catch (Exception e) {
+            sendQuietly(exchange, 500, errorJson(e.getMessage()));
+        }
+    }
+
+    private void handleDialogProfile(HttpExchange exchange) throws IOException {
+        try {
+            if (!requireMethod(exchange, "POST")) return;
+            JsonNode body = readJson(exchange);
+            String sid = body.path("dialogId").asText("").trim();
+            String profileId = body.path("profileId").asText("").trim();
+            if (!store.dialogExists(sid)) throw new IllegalArgumentException("Dialog not found.");
+            if (!store.loadEntries(sid, "history").isEmpty()) {
+                throw new IllegalArgumentException("Профиль можно выбрать только до первого сообщения.");
+            }
+            store.applyProfile(sid, profileId);
+            store.logAction(sid, "profile_applied", MAPPER.createObjectNode().put("profileId", profileId).toString());
+            sendJson(exchange, 200, memoryResponse(sid));
+        } catch (IllegalArgumentException e) {
+            sendQuietly(exchange, 400, errorJson(e.getMessage()));
+        } catch (Exception e) {
+            sendQuietly(exchange, 500, errorJson(e.getMessage()));
+        }
+    }
+
+    private void handleProfiles(HttpExchange exchange) throws IOException {
+        try {
+            switch (exchange.getRequestMethod().toUpperCase()) {
+                case "GET" -> {
+                    ObjectNode response = MAPPER.createObjectNode();
+                    response.set("profiles", store.profiles());
+                    sendJson(exchange, 200, response.toString());
+                }
+                case "POST", "PUT" -> {
+                    JsonNode body = readJson(exchange);
+                    String id = body.path("id").asText("").trim();
+                    String name = body.path("name").asText("").trim();
+                    if (name.isEmpty()) throw new IllegalArgumentException("Название профиля не должно быть пустым.");
+                    if (name.length() > 80) throw new IllegalArgumentException("Название профиля слишком длинное.");
+                    ObjectNode existing = id.isEmpty() ? null : store.profile(id);
+                    if (existing != null && existing.path("builtin").asBoolean(false)) {
+                        throw new IllegalArgumentException("Встроенный профиль нельзя изменить; сохраните его копию.");
+                    }
+                    ObjectNode config = validateConfig(body);
+                    if (id.isEmpty()) id = "profile-" + UUID.randomUUID();
+                    store.saveProfile(id, name, config.path("rules").toString(), false);
+                    ObjectNode response = MAPPER.createObjectNode();
+                    response.put("profileId", id);
+                    response.set("profiles", store.profiles());
+                    sendJson(exchange, 200, response.toString());
+                }
+                case "DELETE" -> {
+                    String id = queryParam(exchange, "id");
+                    ObjectNode existing = store.profile(id);
+                    if (existing == null) throw new IllegalArgumentException("Профиль не найден.");
+                    if (existing.path("builtin").asBoolean(false)) {
+                        throw new IllegalArgumentException("Встроенный профиль нельзя удалить.");
+                    }
+                    store.deleteProfile(id);
+                    ObjectNode response = MAPPER.createObjectNode();
+                    response.set("profiles", store.profiles());
+                    sendJson(exchange, 200, response.toString());
+                }
+                default -> sendJson(exchange, 405, errorJson("Use GET, POST, PUT or DELETE."));
+            }
+        } catch (IllegalArgumentException e) {
+            sendQuietly(exchange, 400, errorJson(e.getMessage()));
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Agent v2 profile operation failed", e);
             sendQuietly(exchange, 500, errorJson(e.getMessage()));
         }
     }
@@ -305,7 +378,7 @@ public class AgentV2Controller {
                 case "GET" -> {
                     ObjectNode response = MAPPER.createObjectNode();
                     if ("lt".equals(layer)) {
-                        response.set("longTerm", store.agentConfig());
+                        response.set("longTerm", sid == null ? store.agentConfig() : store.dialogAgentConfig(sid));
                     } else if ("wt".equals(layer)) {
                         response.set("working", store.working(sid));
                     } else if ("st".equals(layer)) {
@@ -319,7 +392,8 @@ public class AgentV2Controller {
                     JsonNode body = readJson(exchange);
                     if ("lt".equals(layer)) {
                         ObjectNode config = validateConfig(body.has("longTerm") ? body.get("longTerm") : body);
-                        store.saveAgentConfig(config.toString());
+                        if (sid == null) store.saveAgentConfig(config.toString());
+                        else store.saveDialogAgentConfig(sid, config.toString());
                     } else if ("wt".equals(layer)) {
                         JsonNode working = body.has("working") ? body.get("working") : body;
                         store.saveWorking(sid, working);
@@ -337,9 +411,10 @@ public class AgentV2Controller {
                 }
                 case "DELETE" -> {
                     if ("lt".equals(layer)) {
-                        store.saveAgentConfig("{\"rules\":[]}");
+                        if (sid == null) store.saveAgentConfig("{\"rules\":[]}");
+                        else store.saveDialogAgentConfig(sid, "{\"rules\":[]}");
                         store.setState("lt_initialized", "true");
-                        store.setState("lt_bootstrap_completed", "true");
+                        if (sid != null) store.setState("lt_bootstrap_completed:" + sid, "true");
                     } else if ("wt".equals(layer)) {
                         store.clearWorking(sid);
                     } else if ("st".equals(layer)) {
@@ -378,10 +453,12 @@ public class AgentV2Controller {
             if ("approve".equals(action)) {
                 String text = body.path("text").asText(candidate.path("text").asText()).trim();
                 if (text.isEmpty()) throw new IllegalArgumentException("Rule text must not be empty.");
-                ObjectNode config = store.agentConfig();
+                ObjectNode config = store.dialogAgentConfig(sid);
                 ArrayNode rules = config.withArray("rules");
                 for (JsonNode rule : rules) {
-                    if (rule.path("text").asText("").trim().equalsIgnoreCase(text)) {
+                    boolean updateTarget = "update".equals(candidate.path("operation").asText())
+                            && candidate.path("targetRuleId").asText().equals(rule.path("id").asText());
+                    if (!updateTarget && rule.path("text").asText("").trim().equalsIgnoreCase(text)) {
                         throw new IllegalArgumentException("Такое правило уже есть в Long-term.");
                     }
                 }
@@ -412,7 +489,7 @@ public class AgentV2Controller {
                     rule.put("sourceFact", candidate.path("sourceFact").asText());
                 }
                 validateConfig(config);
-                store.saveAgentConfig(config.toString());
+                store.saveDialogAgentConfig(sid, config.toString());
                 store.resolveRuleCandidate(id, "approved");
             } else if ("reject".equals(action)) {
                 store.resolveRuleCandidate(id, "rejected");
@@ -579,18 +656,55 @@ public class AgentV2Controller {
     private String analysisPrompt(List<String> dialogIds, String scope) {
         ObjectNode data = MAPPER.createObjectNode();
         data.put("scope", scope);
-        data.set("longTerm", store.agentConfig());
         ArrayNode dialogs = data.putArray("dialogs");
         for (String sid : dialogIds) {
             ObjectNode dialog = dialogs.addObject();
             dialog.put("dialogId", sid);
             dialog.put("title", store.dialogTitle(sid));
+            dialog.put("profileId", store.dialogProfileId(sid));
+            ObjectNode profile = store.profile(store.dialogProfileId(sid));
+            dialog.put("profileName", profile == null ? "" : profile.path("name").asText());
+            dialog.set("longTerm", store.dialogAgentConfig(sid));
             dialog.set("turns", analysisTurns(sid));
             dialog.set("tokenSummary", analysisTokenSummary(sid));
             dialog.set("technicalCalls", analysisTechnicalCalls(sid));
             dialog.set("working", store.working(sid));
             dialog.set("facts", factsJson(sid));
             dialog.set("userActions", analysisUserActions(sid));
+        }
+        if ("script".equals(scope)) {
+            return """
+                    Ты проверяешь результаты УЖЕ ВЫПОЛНЕННОГО скрипта: насколько точно агент
+                    соблюдает профиль каждого диалога. Не анализируй интерфейс или код приложения.
+                    Отвечай по-русски в корректном Markdown.
+
+                    Для каждого диалога используй profileName и включённые правила longTerm как эталон.
+                    Проверь ВСЕ основные ответы assistant из turns, а не только первый или последний.
+                    Отдельно оцени:
+                    - соблюдение требований к подробности, структуре и тону;
+                    - наличие или отсутствие кода в соответствии с профилем;
+                    - стабильность соблюдения профиля от ответа к ответу;
+                    - техническую корректность ответа отдельно от соответствия профилю.
+
+                    Структура результата:
+                    1. «Итог по профилям» — таблица: профиль, вердикт (соблюдён / частично /
+                       нарушён), какие ответы содержат отклонения, краткое обоснование.
+                    2. «Проверка правил» — для каждого профиля отдельно проверь каждое включённое
+                       правило и приведи короткие примеры из конкретных номеров ответов.
+                    3. «Сравнение одинаковых вопросов» — выясни, действительно ли ответы на одинаковые
+                       вопросы различаются согласно профилям. Не считай нарушением различия, которые
+                       не связаны с правилами профиля.
+                    4. «Технические ошибки» — отдельно перечисли ошибки в содержании, если они есть.
+                    5. «Вывод» — кратко укажи, какой профиль соблюдается лучше и что следует изменить
+                       в правилах или системном промпте.
+
+                    Не повторяй ответы целиком и не пересказывай вопросы. Ссылайся на номера turns.
+                    Не выдумывай отклонения: если профиль соблюдён, так и напиши. Если ответов нет
+                    или скрипт не выполнен полностью, явно отметь недостаток данных.
+
+                    Результаты выполненного скрипта:
+                    %s
+                    """.formatted(data.toString());
         }
         return """
                 Ты анализируешь ПОВЕДЕНИЕ ПОЛЬЗОВАТЕЛЯ И ПАМЯТИ АГЕНТА, а не функции
@@ -722,7 +836,7 @@ public class AgentV2Controller {
         ObjectNode memory = MAPPER.createObjectNode();
         memory.put("systemPrompt", AgentProtocol.systemPrompt(false));
         memory.set("longTerm", store.agentConfig());
-        memory.set("ruleCandidates", store.ruleCandidates(true));
+        memory.set("ruleCandidates", MAPPER.createArrayNode());
         memory.set("working", MAPPER.createObjectNode());
         memory.set("facts", MAPPER.createArrayNode());
         memory.set("layers", MAPPER.createObjectNode());
