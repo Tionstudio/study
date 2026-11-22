@@ -1916,9 +1916,11 @@ public class AgentV2Session {
     /** Pushes the current fact list to the page ("sticky" mode memory panel). */
     private void emitFacts(Listener listener) throws IOException {
         ArrayNode arr = MAPPER.createArrayNode();
-        for (AgentProtocol.Fact f : facts) {
-            arr.addObject().put("category", f.category())
-                    .put("key", f.key()).put("value", f.value());
+        for (MemoryStore.StoredFact f : dialogStore.listFactRecords(id)) {
+            arr.addObject().put("id", f.id()).put("category", f.category())
+                    .put("key", f.key()).put("value", f.value())
+                    .put("createdAt", f.createdAt()).put("updatedAt", f.updatedAt())
+                    .put("revision", f.revision());
         }
         ObjectNode json = MAPPER.createObjectNode();
         json.set("facts", arr);
@@ -2146,17 +2148,74 @@ public class AgentV2Session {
         results.add(result);
         List<AgentProtocol.Fact> extracted = AgentProtocol.parseFacts(result.reply());
         if (!extracted.isEmpty()) {
-            facts = dialogStore.upsertFacts(id, extracted, factsMax);
-            emitFacts(listener);
-            LOG.info("Agent session " + id + ": " + extracted.size() + " fact(s) extracted from "
-                    + (fromAssistant ? "assistant reply" : "user message")
-                    + ", total stored: " + facts.size());
-            if (!fromAssistant && !aborted) {
-                LlmClient.ChatResult candidates = detectRuleCandidates(extracted, listener);
-                if (candidates != null) results.add(candidates);
+            ConflictDetection conflicts = detectFactConflicts(extracted, listener);
+            if (conflicts.result() != null) results.add(conflicts.result());
+            if (conflicts.valid()) {
+                facts = dialogStore.applyFacts(id, extracted, factsMax, conflicts.targets(), "auto");
+                emitFacts(listener);
+                LOG.info("Agent session " + id + ": " + extracted.size() + " fact(s) extracted from "
+                        + (fromAssistant ? "assistant reply" : "user message")
+                        + ", contradictions replaced: " + conflicts.targets().size()
+                        + ", total stored: " + facts.size());
+                if (!fromAssistant && !aborted) {
+                    LlmClient.ChatResult candidates = detectRuleCandidates(extracted, listener);
+                    if (candidates != null) results.add(candidates);
+                }
             }
         }
         return results;
+    }
+
+    private record ConflictDetection(Map<Integer, Long> targets, LlmClient.ChatResult result,
+                                     boolean valid) { }
+
+    /** LLM identifies contradictions; validated Java code applies only existing same-dialog IDs. */
+    private ConflictDetection detectFactConflicts(List<AgentProtocol.Fact> extracted,
+            Listener listener) throws IOException {
+        List<MemoryStore.StoredFact> stored = dialogStore.listFactRecords(id);
+        if (stored.isEmpty()) return new ConflictDetection(Map.of(), null, true);
+        ArrayNode incoming = MAPPER.createArrayNode();
+        for (AgentProtocol.Fact fact : extracted) {
+            incoming.addObject().put("category", fact.category())
+                    .put("key", fact.key()).put("value", fact.value());
+        }
+        ArrayNode existing = MAPPER.createArrayNode();
+        Set<Long> existingIds = new java.util.HashSet<>();
+        for (MemoryStore.StoredFact fact : stored) {
+            existingIds.add(fact.id());
+            existing.addObject().put("id", fact.id()).put("category", fact.category())
+                    .put("key", fact.key()).put("value", fact.value())
+                    .put("updatedAt", fact.updatedAt());
+        }
+        LlmClient.ChatResult result = callLlm(List.of(new LlmClient.Message("user",
+                AgentProtocol.factConflictPrompt(incoming.toString(), existing.toString()))),
+                listener, false, "fact_conflicts");
+        if (result == null || result.reply() == null || result.reply().isBlank()) {
+            LOG.warning("Agent session " + id + ": fact conflict check failed; batch not saved");
+            return new ConflictDetection(Map.of(), result, false);
+        }
+        try {
+            String text = result.reply().trim()
+                    .replaceFirst("^```(?:json)?\\s*", "").replaceFirst("```$", "").trim();
+            int start = text.indexOf('{'); int end = text.lastIndexOf('}');
+            if (start >= 0 && end > start) text = text.substring(start, end + 1);
+            JsonNode parsed = MAPPER.readTree(text);
+            if (!parsed.path("conflicts").isArray()) throw new IllegalArgumentException("conflicts must be an array");
+            Map<Integer, Long> targets = new java.util.HashMap<>();
+            for (JsonNode conflict : parsed.path("conflicts")) {
+                int index = conflict.path("newIndex").asInt(-1);
+                long target = conflict.path("existingId").asLong(0);
+                if (index < 0 || index >= extracted.size() || !existingIds.contains(target)) {
+                    throw new IllegalArgumentException("invalid conflict reference");
+                }
+                targets.put(index, target);
+            }
+            return new ConflictDetection(targets, result, true);
+        } catch (Exception e) {
+            LOG.warning("Agent session " + id + ": invalid fact conflict response; batch not saved: "
+                    + abbreviate(result.reply(), 200));
+            return new ConflictDetection(Map.of(), result, false);
+        }
     }
 
     /** One-time initial adaptation; never overwrites the configuration directly. */

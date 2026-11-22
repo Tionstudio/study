@@ -161,7 +161,11 @@
         .memory-body .summary-box { min-height: 42px; max-height: 180px; padding: 8px; border-radius: 6px; background: var(--surface); }
         .summary-box.empty-text { color: var(--muted); }
         .facts-list { display: flex; flex-direction: column; max-height: 240px; margin-bottom: 7px; overflow-y: auto; scrollbar-width: thin; border-top: 1px solid var(--line); }
-        .fact-row { display: grid; grid-template-columns: 24px minmax(0, .85fr) minmax(0, 1.3fr) 25px; gap: 6px; align-items: center; min-height: 34px; padding: 4px 2px; border-bottom: 1px solid var(--line); background: var(--surface); }
+        .fact-row { display: grid; grid-template-columns: 24px minmax(0, .85fr) minmax(0, 1.3fr) 54px; gap: 6px; align-items: center; min-height: 34px; padding: 4px 2px; border-bottom: 1px solid var(--line); background: var(--surface); }
+        .fact-actions { display: flex; gap: 2px; }
+        .fact-history { max-height: 220px; margin-top: 7px; overflow-y: auto; font-size: 11px; }
+        .fact-change { padding: 7px 2px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+        .fact-change-values { margin-top: 3px; color: var(--muted); }
         .fact-row:not(.editing) { cursor: default; }
         .fact-row:not(.editing):hover { background: var(--bg); }
         .fact-type { text-align: center; cursor: help; font-size: 14px; }
@@ -322,6 +326,7 @@
                     <div class="st-section-head"><strong>Sticky-факты</strong><div class="st-title-group"><span id="factsCount" class="chip">0</span><button id="clearFacts" class="btn small danger" type="button" title="Очистить все факты" aria-label="Очистить все факты">🗑</button></div></div>
                     <div id="factsList" class="facts-list"></div>
                     <button id="addFact" class="btn small" type="button">+ Добавить факт</button>
+                    <details id="factHistoryPanel" class="raw-editor" hidden><summary>История изменений факта</summary><div id="factHistory" class="fact-history"></div></details>
                 </section>
                 <details class="raw-editor"><summary>Исходный JSON фактов</summary>
                     <textarea id="factsEditor" aria-label="JSON sticky-фактов"></textarea>
@@ -590,7 +595,7 @@
     }
     function renderLlmCall(log) {
         if (!log || log.kind === 'chat') return null;
-        const labels = {planning:'Планирование', validation:'Валидация результата', invariant_check:'Проверка инвариантов', extract_st:'Извлечение фактов', sticky_extract:'Извлечение фактов', working_update:'Обновление задачи', summary:'Сжатие диалога', facts_consolidate:'Объединение фактов', lt_candidates:'Поиск предпочтений для LT', lt_bootstrap:'Первичная настройка LT', service:'Служебная операция'};
+        const labels = {planning:'Планирование', validation:'Валидация результата', invariant_check:'Проверка инвариантов', extract_st:'Извлечение фактов', sticky_extract:'Извлечение фактов', fact_conflicts:'Проверка противоречий фактов', working_update:'Обновление задачи', summary:'Сжатие диалога', facts_consolidate:'Объединение фактов', lt_candidates:'Поиск предпочтений для LT', lt_bootstrap:'Первичная настройка LT', service:'Служебная операция'};
         const usage = log.usage || {};
         const title = (labels[log.kind] || 'Служебная операция')
             + (Number.isFinite(log.durationMs) ? ' · ' + (log.durationMs / 1000).toFixed(1) + ' с' : '')
@@ -1094,7 +1099,9 @@
     }
     function renderFactsEditor(facts) {
         const list = $('factsList');
-        list._facts = facts.map(f => ({category:String(f.category || 'fact'), key:String(f.key || ''), value:String(f.value || '')}));
+        list._facts = facts.map(f => ({id:Number(f.id || 0), category:String(f.category || 'fact'),
+            key:String(f.key || ''), value:String(f.value || ''), createdAt:f.createdAt || '',
+            updatedAt:f.updatedAt || '', revision:Number(f.revision || 1)}));
         list.innerHTML = '';
         if (!list._facts.length) list.innerHTML = '<span class="status facts-empty">Фактов пока нет. Добавьте вручную или включите автофакты.</span>';
         list._facts.forEach((fact, index) => {
@@ -1102,9 +1109,13 @@
             const row = document.createElement('div'); row.className = 'fact-row'; row.title = 'Двойной клик — изменить факт';
             row.innerHTML = '<span class="fact-type" title="' + escapeHtml(label) + '" aria-label="' + escapeHtml(label) + '">' + icon + '</span>'
                 + '<span class="fact-key" title="' + escapeHtml(fact.key) + '">' + escapeHtml(fact.key) + '</span>'
-                + '<span class="fact-value" title="' + escapeHtml(fact.value) + '">' + escapeHtml(fact.value) + '</span>'
-                + '<button class="btn small danger delete-fact" type="button" title="Удалить факт" aria-label="Удалить факт">×</button>';
+                + '<span class="fact-value" title="v' + fact.revision + ' · обновлён ' + escapeHtml(fact.updatedAt) + '">' + escapeHtml(fact.value) + '</span>'
+                + '<div class="fact-actions">'
+                + (fact.id ? '<button class="btn small history-fact" type="button" title="История изменений" aria-label="История изменений">↺</button>' : '')
+                + '<button class="btn small danger delete-fact" type="button" title="Удалить факт" aria-label="Удалить факт">×</button></div>';
             row.ondblclick = () => startFactEdit(index);
+            const historyButton = row.querySelector('.history-fact');
+            if (historyButton) historyButton.onclick = () => showFactHistory(fact);
             row.querySelector('.delete-fact').onclick = async () => {
                 list._facts.splice(index, 1); renderFactsEditor(list._facts);
                 setStatus('Сохранение фактов…'); await saveLayer('st', {facts:factsFromEditor()});
@@ -1112,6 +1123,25 @@
             list.appendChild(row);
         });
         syncFactsFromEditor();
+    }
+    async function showFactHistory(fact) {
+        const panel = $('factHistoryPanel'); panel.hidden = false; panel.open = true;
+        $('factHistoryPanel').querySelector('summary').textContent = 'История: ' + fact.key + ' · v' + fact.revision;
+        $('factHistory').innerHTML = '<div class="status">Загрузка…</div>';
+        try {
+            const response = await fetch('/api/v2/agent/memory?layer=fact-history&fact=' + fact.id
+                + '&dialog=' + encodeURIComponent(sessionId || ''));
+            const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Ошибка загрузки');
+            const reasons = {same_key:'Обновление по ключу', contradiction:'Замена противоречащего факта',
+                auto:'Автоматическое извлечение', manual:'Ручное редактирование', limit:'Удаление по лимиту', clear:'Очистка памяти'};
+            $('factHistory').innerHTML = (data.history || []).map(change => {
+                const before = change.oldValue?.value || '—';
+                const after = change.newValue?.value || 'удалён';
+                return '<div class="fact-change"><strong>' + escapeHtml(change.createdAt || '') + '</strong> · '
+                    + escapeHtml(reasons[change.reason] || change.operation || change.reason)
+                    + '<div class="fact-change-values">' + escapeHtml(before) + ' → ' + escapeHtml(after) + '</div></div>';
+            }).join('') || '<div class="status">Изменений пока нет.</div>';
+        } catch (error) { $('factHistory').innerHTML = '<div class="status error-text">' + escapeHtml(error.message) + '</div>'; }
     }
     function startFactEdit(index) {
         const list = $('factsList');
@@ -1547,7 +1577,7 @@
         if (busy || (scope === 'dialog' && !sessionId) || (scope === 'script' && !scriptDialogIds.length)) return;
         setBusy(true, false); $('typingText').textContent = 'Анализ моделью ' + $('analysisModel').value + '…';
         try {
-            const response = await fetch('/api/v2/agent/analyze', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({dialogId:sessionId, dialogIds:scope === 'script' ? scriptDialogIds : undefined, model:$('analysisModel').value, scope})});
+            const response = await fetch('/api/v2/agent/analyze', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({dialogId:sessionId, dialogIds:scope === 'script' ? scriptDialogIds : undefined, script:scope === 'script' ? scriptData : undefined, model:$('analysisModel').value, scope})});
             const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Analysis failed');
             const reply = normalizeAnalysisText(data.reply);
             const el = addMessage('', 'analysis assistant md');

@@ -673,6 +673,23 @@ public class AgentProtocol {
                 """.formatted(factsJson);
     }
 
+    /** Detects semantic contradictions without allowing the model to mutate storage. */
+    public static String factConflictPrompt(String newFactsJson, String storedFactsJson) {
+        return """
+                Сравни новые факты с сохранёнными. Найди только ЯВНЫЕ противоречия:
+                два значения описывают одно свойство или решение и не могут быть актуальны
+                одновременно. Разные независимые сведения и дополняющие детали конфликтом не являются.
+                Совпадение нормализованного ключа обрабатывается кодом отдельно, его не возвращай.
+                Ответь СТРОГО одним JSON-объектом без markdown:
+                {"conflicts":[{"newIndex":0,"existingId":123}]}
+                newIndex — индекс нового факта, existingId — id единственного заменяемого факта.
+                Если противоречий нет, верни {"conflicts":[]}.
+
+                Новые факты: %s
+                Сохранённые факты: %s
+                """.formatted(newFactsJson, storedFactsJson);
+    }
+
     /**
      * Parses the fact-extraction reply. Tolerates markdown fences and prose
      * around the JSON object; invalid entries are skipped. Never null.

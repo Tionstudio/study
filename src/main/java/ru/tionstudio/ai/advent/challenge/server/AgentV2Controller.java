@@ -434,6 +434,11 @@ public class AgentV2Controller {
                         response.set("working", store.working(sid));
                     } else if ("st".equals(layer)) {
                         response.set("facts", factsJson(sid));
+                    } else if ("fact-history".equals(layer)) {
+                        long factId = 0;
+                        try { factId = Long.parseLong(queryParam(exchange, "fact")); }
+                        catch (Exception ignored) { }
+                        response.set("history", store.factHistory(sid, factId));
                     } else {
                         response.set("memory", sessionFor(sid, defaultClient).memorySnapshot());
                     }
@@ -671,7 +676,9 @@ public class AgentV2Controller {
                 sendJson(exchange, 400, errorJson("Unknown analysis model."));
                 return;
             }
-            String prompt = analysisPrompt(dialogIds, scope);
+            String prompt = analysisPrompt(dialogIds, scope, body.path("script"));
+            String freshnessReport = "script".equals(scope)
+                    ? factFreshnessReport(dialogIds, body.path("script")) : "";
             ObjectNode request = MAPPER.createObjectNode();
             request.put("model", client.model());
             request.put("prompt", prompt);
@@ -692,7 +699,7 @@ public class AgentV2Controller {
             analysisAction.set("dialogIds", MAPPER.valueToTree(dialogIds));
             store.logAction(sid, "analysis", analysisAction.toString());
             ObjectNode response = MAPPER.createObjectNode();
-            response.put("reply", result.reply());
+            response.put("reply", freshnessReport + result.reply());
             response.put("model", client.model());
             response.set("usage", usage);
             sendJson(exchange, 200, response.toString());
@@ -704,11 +711,12 @@ public class AgentV2Controller {
         }
     }
 
-    private String analysisPrompt(List<String> dialogIds, String scope) {
+    private String analysisPrompt(List<String> dialogIds, String scope, JsonNode script) {
         ObjectNode data = MAPPER.createObjectNode();
         data.put("scope", scope);
         ArrayNode dialogs = data.putArray("dialogs");
-        for (String sid : dialogIds) {
+        for (int dialogIndex = 0; dialogIndex < dialogIds.size(); dialogIndex++) {
+            String sid = dialogIds.get(dialogIndex);
             ObjectNode dialog = dialogs.addObject();
             dialog.put("dialogId", sid);
             dialog.put("title", store.dialogTitle(sid));
@@ -722,6 +730,10 @@ public class AgentV2Controller {
             dialog.set("working", store.working(sid));
             dialog.set("facts", factsJson(sid));
             dialog.set("userActions", analysisUserActions(sid));
+            if ("script".equals(scope)) {
+                dialog.set("factFreshnessAudit", factFreshnessAudit(sid,
+                        script.path("dialogs").path(dialogIndex)));
+            }
         }
         if ("script".equals(scope)) {
             return """
@@ -736,6 +748,10 @@ public class AgentV2Controller {
                     - наличие или отсутствие кода в соответствии с профилем;
                     - стабильность соблюдения профиля от ответа к ответу;
                     - техническую корректность ответа отдельно от соответствия профилю.
+                    Если factFreshnessAudit.available=true, используй его как результат уже выполненной
+                    кодовой проверки: не меняй числа, отдельно укажи, сколько раз агент назвал устаревшее
+                    значение и в скольких основных промптах старые значения присутствовали после замены.
+                    missingCurrentValues означает, что актуальное значение не найдено в ответе.
 
                     Структура результата:
                     1. «Итог по профилям» — таблица: профиль, вердикт (соблюдён / частично /
@@ -788,6 +804,114 @@ public class AgentV2Controller {
                 Данные для анализа:
                 %s
                 """.formatted(data.toString());
+    }
+
+    /** Deterministic verification against optional factChecks declared by the script. */
+    private ObjectNode factFreshnessAudit(String sid, JsonNode scriptDialog) {
+        ObjectNode audit = MAPPER.createObjectNode();
+        JsonNode checks = scriptDialog.path("factChecks");
+        audit.put("available", checks.isArray() && !checks.isEmpty());
+        ArrayNode results = audit.putArray("checks");
+        if (!checks.isArray()) return audit;
+        List<ObjectNode> chatLogs = new ArrayList<>();
+        ArrayNode logs = store.llmLogs(sid);
+        for (int i = logs.size() - 1; i >= 0; i--) {
+            ObjectNode log = (ObjectNode) logs.get(i);
+            if ("chat".equals(log.path("kind").asText())) chatLogs.add(log);
+        }
+        int staleAnswers = 0, staleMentions = 0, stalePrompts = 0, missingCurrent = 0;
+        for (JsonNode check : checks) {
+            int messageNumber = check.path("message").asInt(0);
+            ObjectNode result = results.addObject();
+            result.put("message", messageNumber);
+            if (messageNumber < 1 || messageNumber > chatLogs.size()) {
+                result.put("status", "missing_turn");
+                continue;
+            }
+            ObjectNode log = chatLogs.get(messageNumber - 1);
+            String answer = log.path("response").asText("");
+            String prompt = log.path("request").toString();
+            ArrayNode missing = result.putArray("missingCurrentValues");
+            for (JsonNode expected : check.path("expected")) {
+                if (!containsIgnoreCase(answer, expected.asText())) missing.add(expected.asText());
+            }
+            ArrayNode staleInAnswer = result.putArray("staleValuesInAnswer");
+            ArrayNode staleInPrompt = result.putArray("staleValuesInPrompt");
+            int mentions = 0;
+            for (JsonNode obsolete : check.path("obsolete")) {
+                String value = obsolete.asText();
+                int count = countIgnoreCase(answer, value);
+                if (count > 0) { staleInAnswer.add(value); mentions += count; }
+                if (containsIgnoreCase(prompt, value)) staleInPrompt.add(value);
+            }
+            result.put("staleMentionCount", mentions);
+            if (!missing.isEmpty()) missingCurrent++;
+            if (!staleInAnswer.isEmpty()) staleAnswers++;
+            if (!staleInPrompt.isEmpty()) stalePrompts++;
+            staleMentions += mentions;
+            result.put("status", missing.isEmpty() && staleInAnswer.isEmpty()
+                    && staleInPrompt.isEmpty() ? "ok" : "failed");
+        }
+        audit.put("checkedQuestions", results.size());
+        audit.put("answersWithStaleValues", staleAnswers);
+        audit.put("staleValueMentions", staleMentions);
+        audit.put("promptsWithStaleValues", stalePrompts);
+        audit.put("answersMissingCurrentValues", missingCurrent);
+        return audit;
+    }
+
+    private static boolean containsIgnoreCase(String text, String value) {
+        return value != null && !value.isBlank()
+                && text.toLowerCase(java.util.Locale.ROOT).contains(value.toLowerCase(java.util.Locale.ROOT));
+    }
+
+    private static int countIgnoreCase(String text, String value) {
+        if (value == null || value.isBlank()) return 0;
+        String haystack = text.toLowerCase(java.util.Locale.ROOT);
+        String needle = value.toLowerCase(java.util.Locale.ROOT);
+        int count = 0, from = 0;
+        while ((from = haystack.indexOf(needle, from)) >= 0) {
+            count++; from += needle.length();
+        }
+        return count;
+    }
+
+    private String factFreshnessReport(List<String> dialogIds, JsonNode script) {
+        StringBuilder report = new StringBuilder();
+        for (int i = 0; i < dialogIds.size(); i++) {
+            ObjectNode audit = factFreshnessAudit(dialogIds.get(i), script.path("dialogs").path(i));
+            if (!audit.path("available").asBoolean()) continue;
+            if (report.isEmpty()) report.append("## Автоматическая проверка актуальности фактов\n\n");
+            report.append("**").append(script.path("dialogs").path(i).path("name").asText("Диалог"))
+                    .append("**: контрольных вопросов — ").append(audit.path("checkedQuestions").asInt())
+                    .append("; ответов с устаревшими значениями — ")
+                    .append(audit.path("answersWithStaleValues").asInt())
+                    .append("; устаревших упоминаний — ").append(audit.path("staleValueMentions").asInt())
+                    .append("; основных промптов со старыми значениями — ")
+                    .append(audit.path("promptsWithStaleValues").asInt())
+                    .append("; ответов без актуального значения — ")
+                    .append(audit.path("answersMissingCurrentValues").asInt()).append(".\n\n");
+            for (JsonNode check : audit.path("checks")) {
+                if ("ok".equals(check.path("status").asText())) continue;
+                report.append("- Сообщение ").append(check.path("message").asInt()).append(": ");
+                if ("missing_turn".equals(check.path("status").asText())) {
+                    report.append("основной ответ отсутствует.\n"); continue;
+                }
+                List<String> problems = new ArrayList<>();
+                if (!check.path("missingCurrentValues").isEmpty()) {
+                    problems.add("не названо: " + check.path("missingCurrentValues").toString());
+                }
+                if (!check.path("staleValuesInAnswer").isEmpty()) {
+                    problems.add("устарело в ответе: " + check.path("staleValuesInAnswer").toString());
+                }
+                if (!check.path("staleValuesInPrompt").isEmpty()) {
+                    problems.add("устарело в промпте: " + check.path("staleValuesInPrompt").toString());
+                }
+                report.append(String.join("; ", problems)).append(".\n");
+            }
+            report.append('\n');
+        }
+        return report.toString();
     }
 
     /** Compact turn view: no repeated request messages, reasoning or raw technical payloads. */
@@ -901,8 +1025,11 @@ public class AgentV2Controller {
 
     private ArrayNode factsJson(String sid) {
         ArrayNode facts = MAPPER.createArrayNode();
-        for (AgentProtocol.Fact f : store.listFacts(sid)) {
-            facts.addObject().put("category", f.category()).put("key", f.key()).put("value", f.value());
+        for (MemoryStore.StoredFact f : store.listFactRecords(sid)) {
+            facts.addObject().put("id", f.id()).put("category", f.category())
+                    .put("key", f.key()).put("value", f.value())
+                    .put("createdAt", f.createdAt()).put("updatedAt", f.updatedAt())
+                    .put("revision", f.revision());
         }
         return facts;
     }

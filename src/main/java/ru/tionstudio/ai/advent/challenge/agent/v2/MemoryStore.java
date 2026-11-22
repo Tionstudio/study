@@ -13,9 +13,11 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.logging.Logger;
 
 /** SQLite storage for the v2 agent: dialog ST, task WT and global agent config LT. */
@@ -72,6 +74,21 @@ public class MemoryStore {
                         UNIQUE(dialog_id, key_norm)
                     )
                     """);
+            ensureFactVersioning(c, st);
+            st.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS v2_fact_history (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        dialog_id TEXT NOT NULL,
+                        fact_id INTEGER NOT NULL,
+                        operation TEXT NOT NULL,
+                        reason TEXT NOT NULL DEFAULT '',
+                        old_json TEXT NOT NULL DEFAULT '{}',
+                        new_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL
+                    )
+                    """);
+            st.executeUpdate("CREATE INDEX IF NOT EXISTS idx_v2_fact_history_dialog "
+                    + "ON v2_fact_history(dialog_id, fact_id, id)");
             st.executeUpdate("""
                     CREATE TABLE IF NOT EXISTS v2_working (
                         dialog_id TEXT NOT NULL,
@@ -389,19 +406,48 @@ public class MemoryStore {
 
     // ----- short-term sticky facts -----
 
+    public record StoredFact(long id, String category, String key, String value,
+                             String createdAt, String updatedAt, int revision) { }
+
+    private static void ensureFactVersioning(Connection c, Statement st) throws SQLException {
+        java.util.Set<String> columns = new java.util.HashSet<>();
+        try (ResultSet rs = st.executeQuery("PRAGMA table_info(v2_facts)")) {
+            while (rs.next()) columns.add(rs.getString("name").toLowerCase());
+        }
+        if (!columns.contains("created_at")) {
+            st.executeUpdate("ALTER TABLE v2_facts ADD COLUMN created_at TEXT NOT NULL DEFAULT ''");
+            st.executeUpdate("UPDATE v2_facts SET created_at = updated_at WHERE created_at = ''");
+        }
+        if (!columns.contains("revision")) {
+            st.executeUpdate("ALTER TABLE v2_facts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1");
+        }
+    }
+
     private static String normalizeFactKey(String key) {
         return key.toLowerCase().replace('ё', 'е').replaceAll("\\s+", " ").trim();
     }
 
-    public synchronized List<AgentProtocol.Fact> listFacts(String dialogId) {
-        List<AgentProtocol.Fact> result = new ArrayList<>();
+    private static StoredFact readFact(ResultSet rs) throws SQLException {
+        return new StoredFact(rs.getLong("id"), rs.getString("category"),
+                rs.getString("key_display"), rs.getString("value"),
+                rs.getString("created_at"), rs.getString("updated_at"), rs.getInt("revision"));
+    }
+
+    private static ObjectNode factJson(StoredFact fact) {
+        ObjectNode json = MAPPER.createObjectNode();
+        json.put("id", fact.id()).put("category", fact.category()).put("key", fact.key())
+                .put("value", fact.value()).put("createdAt", fact.createdAt())
+                .put("updatedAt", fact.updatedAt()).put("revision", fact.revision());
+        return json;
+    }
+
+    public synchronized List<StoredFact> listFactRecords(String dialogId) {
+        List<StoredFact> result = new ArrayList<>();
         try (Connection c = connect(); PreparedStatement ps = c.prepareStatement(
-                "SELECT category, key_display, value FROM v2_facts WHERE dialog_id = ? ORDER BY updated_at, id")) {
+                "SELECT * FROM v2_facts WHERE dialog_id = ? ORDER BY updated_at, id")) {
             ps.setString(1, dialogId);
             try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    result.add(new AgentProtocol.Fact(rs.getString(1), rs.getString(2), rs.getString(3)));
-                }
+                while (rs.next()) result.add(readFact(rs));
             }
             return result;
         } catch (SQLException e) {
@@ -409,54 +455,190 @@ public class MemoryStore {
         }
     }
 
+    public synchronized List<AgentProtocol.Fact> listFacts(String dialogId) {
+        List<AgentProtocol.Fact> result = new ArrayList<>();
+        for (StoredFact f : listFactRecords(dialogId)) {
+            result.add(new AgentProtocol.Fact(f.category(), f.key(), f.value()));
+        }
+        return result;
+    }
+
     public synchronized List<AgentProtocol.Fact> upsertFacts(String dialogId,
             List<AgentProtocol.Fact> facts, int maxFacts) {
-        try (Connection c = connect(); PreparedStatement ps = c.prepareStatement("""
-                INSERT INTO v2_facts(dialog_id, category, key_norm, key_display, value)
-                VALUES(?, ?, ?, ?, ?)
-                ON CONFLICT(dialog_id, key_norm) DO UPDATE SET
-                    category = excluded.category,
-                    key_display = excluded.key_display,
-                    value = excluded.value,
-                    updated_at = datetime('now')
-                """)) {
-            for (AgentProtocol.Fact f : facts) {
-                ps.setString(1, dialogId);
-                ps.setString(2, f.category());
-                ps.setString(3, normalizeFactKey(f.key()));
-                ps.setString(4, f.key());
-                ps.setString(5, f.value());
-                ps.addBatch();
+        return applyFacts(dialogId, facts, maxFacts, Map.of(), "auto");
+    }
+
+    /** Applies a batch atomically; conflictTargets maps new-fact indexes to replaced row IDs. */
+    public synchronized List<AgentProtocol.Fact> applyFacts(String dialogId,
+            List<AgentProtocol.Fact> facts, int maxFacts, Map<Integer, Long> conflictTargets,
+            String reason) {
+        try (Connection c = connect()) {
+            c.setAutoCommit(false);
+            try {
+                String now = Instant.now().toString();
+                for (int i = 0; i < facts.size(); i++) {
+                    AgentProtocol.Fact incoming = facts.get(i);
+                    StoredFact old = findFactByKey(c, dialogId, normalizeFactKey(incoming.key()));
+                    String changeReason = "same_key";
+                    if (old == null && conflictTargets.containsKey(i)) {
+                        old = findFactById(c, dialogId, conflictTargets.get(i));
+                        changeReason = "contradiction";
+                    }
+                    if (old == null) {
+                        long factId = insertFact(c, dialogId, incoming, now);
+                        StoredFact created = findFactById(c, dialogId, factId);
+                        insertFactHistory(c, dialogId, factId, "add", reason,
+                                null, created, now);
+                    } else {
+                        updateFact(c, dialogId, old.id(), incoming, now);
+                        StoredFact updated = findFactById(c, dialogId, old.id());
+                        insertFactHistory(c, dialogId, old.id(), "replace", changeReason,
+                                old, updated, now);
+                    }
+                }
+                if (maxFacts > 0) evictOldFacts(c, dialogId, maxFacts, now);
+                c.commit();
+            } catch (Exception e) {
+                c.rollback();
+                throw e;
+            } finally {
+                c.setAutoCommit(true);
             }
-            ps.executeBatch();
-        } catch (SQLException e) {
-            throw new IllegalStateException("Failed to upsert v2 facts for " + dialogId, e);
-        }
-        if (maxFacts > 0) {
-            try (Connection c = connect(); PreparedStatement ps = c.prepareStatement("""
-                    DELETE FROM v2_facts WHERE dialog_id = ? AND id NOT IN (
-                        SELECT id FROM v2_facts WHERE dialog_id = ?
-                        ORDER BY updated_at DESC, id DESC LIMIT ?)
-                    """)) {
-                ps.setString(1, dialogId);
-                ps.setString(2, dialogId);
-                ps.setInt(3, maxFacts);
-                ps.executeUpdate();
-            } catch (SQLException e) {
-                throw new IllegalStateException("Failed to limit v2 facts for " + dialogId, e);
-            }
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to update v2 facts for " + dialogId, e);
         }
         return listFacts(dialogId);
+    }
+
+    private static StoredFact findFactByKey(Connection c, String dialogId, String keyNorm)
+            throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT * FROM v2_facts WHERE dialog_id = ? AND key_norm = ?")) {
+            ps.setString(1, dialogId); ps.setString(2, keyNorm);
+            try (ResultSet rs = ps.executeQuery()) { return rs.next() ? readFact(rs) : null; }
+        }
+    }
+
+    private static StoredFact findFactById(Connection c, String dialogId, long factId)
+            throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement(
+                "SELECT * FROM v2_facts WHERE dialog_id = ? AND id = ?")) {
+            ps.setString(1, dialogId); ps.setLong(2, factId);
+            try (ResultSet rs = ps.executeQuery()) { return rs.next() ? readFact(rs) : null; }
+        }
+    }
+
+    private static long insertFact(Connection c, String dialogId, AgentProtocol.Fact fact,
+            String now) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement("""
+                INSERT INTO v2_facts(dialog_id, category, key_norm, key_display, value,
+                    created_at, updated_at, revision) VALUES(?, ?, ?, ?, ?, ?, ?, 1)
+                """, Statement.RETURN_GENERATED_KEYS)) {
+            ps.setString(1, dialogId); ps.setString(2, fact.category());
+            ps.setString(3, normalizeFactKey(fact.key())); ps.setString(4, fact.key());
+            ps.setString(5, fact.value()); ps.setString(6, now); ps.setString(7, now);
+            ps.executeUpdate();
+            try (ResultSet keys = ps.getGeneratedKeys()) {
+                if (keys.next()) return keys.getLong(1);
+            }
+        }
+        try (PreparedStatement ps = c.prepareStatement("SELECT last_insert_rowid()");
+             ResultSet rs = ps.executeQuery()) { return rs.getLong(1); }
+    }
+
+    private static void updateFact(Connection c, String dialogId, long factId,
+            AgentProtocol.Fact fact, String now) throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement("""
+                UPDATE v2_facts SET category = ?, key_norm = ?, key_display = ?, value = ?,
+                    updated_at = ?, revision = revision + 1 WHERE dialog_id = ? AND id = ?
+                """)) {
+            ps.setString(1, fact.category()); ps.setString(2, normalizeFactKey(fact.key()));
+            ps.setString(3, fact.key()); ps.setString(4, fact.value()); ps.setString(5, now);
+            ps.setString(6, dialogId); ps.setLong(7, factId); ps.executeUpdate();
+        }
+    }
+
+    private static void insertFactHistory(Connection c, String dialogId, long factId,
+            String operation, String reason, StoredFact oldFact, StoredFact newFact, String now)
+            throws SQLException {
+        try (PreparedStatement ps = c.prepareStatement("""
+                INSERT INTO v2_fact_history(dialog_id, fact_id, operation, reason,
+                    old_json, new_json, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)
+                """)) {
+            ps.setString(1, dialogId); ps.setLong(2, factId); ps.setString(3, operation);
+            ps.setString(4, reason); ps.setString(5, oldFact == null ? "{}" : factJson(oldFact).toString());
+            ps.setString(6, newFact == null ? "{}" : factJson(newFact).toString());
+            ps.setString(7, now); ps.executeUpdate();
+        }
+    }
+
+    private static void evictOldFacts(Connection c, String dialogId, int maxFacts, String now)
+            throws SQLException {
+        List<StoredFact> evicted = new ArrayList<>();
+        try (PreparedStatement ps = c.prepareStatement("""
+                SELECT * FROM v2_facts WHERE dialog_id = ? AND id NOT IN (
+                    SELECT id FROM v2_facts WHERE dialog_id = ?
+                    ORDER BY updated_at DESC, id DESC LIMIT ?)
+                """)) {
+            ps.setString(1, dialogId); ps.setString(2, dialogId); ps.setInt(3, maxFacts);
+            try (ResultSet rs = ps.executeQuery()) { while (rs.next()) evicted.add(readFact(rs)); }
+        }
+        for (StoredFact old : evicted) {
+            insertFactHistory(c, dialogId, old.id(), "delete", "limit", old, null, now);
+            try (PreparedStatement ps = c.prepareStatement(
+                    "DELETE FROM v2_facts WHERE dialog_id = ? AND id = ?")) {
+                ps.setString(1, dialogId); ps.setLong(2, old.id()); ps.executeUpdate();
+            }
+        }
+    }
+
+    public synchronized ArrayNode factHistory(String dialogId, long factId) {
+        ArrayNode result = MAPPER.createArrayNode();
+        String sql = "SELECT * FROM v2_fact_history WHERE dialog_id = ? "
+                + (factId > 0 ? "AND fact_id = ? " : "") + "ORDER BY id DESC LIMIT 200";
+        try (Connection c = connect(); PreparedStatement ps = c.prepareStatement(sql)) {
+            ps.setString(1, dialogId); if (factId > 0) ps.setLong(2, factId);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    ObjectNode item = result.addObject();
+                    item.put("factId", rs.getLong("fact_id"));
+                    item.put("operation", rs.getString("operation"));
+                    item.put("reason", rs.getString("reason"));
+                    item.set("oldValue", readJson(rs.getString("old_json")));
+                    item.set("newValue", readJson(rs.getString("new_json")));
+                    item.put("createdAt", rs.getString("created_at"));
+                }
+            }
+            return result;
+        } catch (SQLException e) {
+            throw new IllegalStateException("Failed to load fact history for " + dialogId, e);
+        }
     }
 
     public synchronized List<AgentProtocol.Fact> replaceFacts(String dialogId,
             List<AgentProtocol.Fact> facts) {
         clearFacts(dialogId);
-        return upsertFacts(dialogId, facts, 0);
+        return applyFacts(dialogId, facts, 0, Map.of(), "manual");
     }
 
     public synchronized void clearFacts(String dialogId) {
-        executeUpdate("DELETE FROM v2_facts WHERE dialog_id = ?", dialogId);
+        try (Connection c = connect()) {
+            c.setAutoCommit(false);
+            try {
+                String now = Instant.now().toString();
+                for (StoredFact old : listFactRecords(dialogId)) {
+                    insertFactHistory(c, dialogId, old.id(), "delete", "clear", old, null, now);
+                }
+                try (PreparedStatement ps = c.prepareStatement(
+                        "DELETE FROM v2_facts WHERE dialog_id = ?")) {
+                    ps.setString(1, dialogId); ps.executeUpdate();
+                }
+                c.commit();
+            } catch (Exception e) { c.rollback(); throw e; }
+            finally { c.setAutoCommit(true); }
+        } catch (Exception e) {
+            throw new IllegalStateException("Failed to clear v2 facts for " + dialogId, e);
+        }
     }
 
     // ----- working memory -----
@@ -1075,6 +1257,7 @@ public class MemoryStore {
             try {
                 st.executeUpdate("DELETE FROM v2_entries WHERE kind IN ('history', 'summary', 'facts')");
                 st.executeUpdate("DELETE FROM v2_facts");
+                st.executeUpdate("DELETE FROM v2_fact_history");
                 st.executeUpdate("DELETE FROM v2_working");
                 st.executeUpdate("DELETE FROM v2_task_state");
                 st.executeUpdate("DELETE FROM v2_task_transitions");
