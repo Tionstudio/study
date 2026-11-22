@@ -134,17 +134,24 @@ public class AgentProtocol {
      * Prompt for the planning phase: the model returns the plan as strict JSON.
      */
     public static String planningPrompt(String userTask) {
+        return planningPrompt(userTask, "");
+    }
+
+    public static String planningPrompt(String userTask, String invariants) {
         return """
                 Составь краткий план решения задачи пользователя. Ответь СТРОГО одним JSON-объектом, без пояснений и markdown:
-                {"steps": [{"title":"краткая формулировка шага", "requiresUserInput":false, "requiredForValidation":true}, ...]}
+                {"steps": [{"title":"краткая формулировка шага", "requiresUserInput":false, "requiredForValidation":true}], "appliedInvariantIds":["id"]}
                 От 1 до 7 шагов. Если задача простая — план может состоять из одного шага.
                 requiresUserInput=true для любого шага, где нужны данные, решение или подтверждение пользователя
                 (например, определить содержание, уточнить требования, выбрать вариант). Не пропускай такие шаги самостоятельно.
                 requiredForValidation=true для шагов, без фактического результата которых задача не решена.
                 Для необязательных дополнений используй requiredForValidation=false. Хотя бы один шаг должен быть обязательным.
+                Если инварианты заданы, перечисли все учтённые идентификаторы в appliedInvariantIds и не планируй их нарушение.
+
+                %s
 
                 Задача пользователя: %s
-                """.formatted(userTask);
+                """.formatted(invariants, userTask);
     }
 
     public record PlanStepSpec(String title, boolean requiresUserInput, boolean requiredForValidation) { }

@@ -65,6 +65,7 @@ public class AgentV2Controller {
         server.createContext("/api/v2/agent/dialog/new", this::handleNewDialog);
         server.createContext("/api/v2/agent/dialog/profile", this::handleDialogProfile);
         server.createContext("/api/v2/agent/profiles", this::handleProfiles);
+        server.createContext("/api/v2/agent/invariants", this::handleInvariants);
         server.createContext("/api/v2/agent/memory", this::handleMemory);
         server.createContext("/api/v2/agent/rule-candidate", this::handleRuleCandidate);
         server.createContext("/api/v2/agent/reset", this::handleReset);
@@ -364,6 +365,56 @@ public class AgentV2Controller {
             LOG.log(Level.WARNING, "Agent v2 profile operation failed", e);
             sendQuietly(exchange, 500, errorJson(e.getMessage()));
         }
+    }
+
+    private void handleInvariants(HttpExchange exchange) throws IOException {
+        try {
+            switch (exchange.getRequestMethod().toUpperCase()) {
+                case "GET" -> sendJson(exchange, 200, invariantsResponse().toString());
+                case "POST", "PUT" -> {
+                    JsonNode body = readJson(exchange);
+                    String id = body.path("id").asText("").trim();
+                    String text = body.path("text").asText("").trim();
+                    if (text.isEmpty()) throw new IllegalArgumentException("Текст инварианта не должен быть пустым.");
+                    if (text.length() > 4000) throw new IllegalArgumentException("Текст инварианта слишком длинный.");
+                    String checkType = body.path("checkType").asText("semantic");
+                    if (!Set.of("semantic", "deterministic").contains(checkType)) {
+                        throw new IllegalArgumentException("Тип проверки: semantic или deterministic.");
+                    }
+                    JsonNode config = body.path("config");
+                    if (!config.isObject()) throw new IllegalArgumentException("config должен быть JSON-объектом.");
+                    ObjectNode value = MAPPER.createObjectNode();
+                    value.put("id", id.isEmpty() ? "inv-" + UUID.randomUUID() : id);
+                    value.put("category", body.path("category").asText("constraint").trim());
+                    value.put("text", text);
+                    value.put("checkType", checkType);
+                    value.set("config", config);
+                    value.put("enabled", body.path("enabled").asBoolean(true));
+                    store.saveInvariant(value, "explicit_editor", body.path("dialogId").asText(""));
+                    sendJson(exchange, 200, invariantsResponse().toString());
+                }
+                case "DELETE" -> {
+                    String id = queryParam(exchange, "id");
+                    String sid = queryParam(exchange, "dialog");
+                    store.deleteInvariant(id, "explicit_editor", sid);
+                    sendJson(exchange, 200, invariantsResponse().toString());
+                }
+                default -> sendJson(exchange, 405, errorJson("Use GET, POST, PUT or DELETE."));
+            }
+        } catch (IllegalArgumentException e) {
+            sendQuietly(exchange, 400, errorJson(e.getMessage()));
+        } catch (Exception e) {
+            LOG.log(Level.WARNING, "Agent v2 invariant operation failed", e);
+            sendQuietly(exchange, 500, errorJson(e.getMessage()));
+        }
+    }
+
+    private ObjectNode invariantsResponse() {
+        ObjectNode response = MAPPER.createObjectNode();
+        response.set("invariants", store.invariants(false));
+        response.set("invariantHistory", store.invariantHistory(50));
+        response.put("invariantRevision", store.invariantRevision());
+        return response;
     }
 
     private void handleMemory(HttpExchange exchange) throws IOException {
@@ -834,7 +885,12 @@ public class AgentV2Controller {
 
     private ObjectNode emptyMemory() {
         ObjectNode memory = MAPPER.createObjectNode();
-        memory.put("systemPrompt", AgentProtocol.systemPrompt(false));
+        String invariantPrompt = store.invariantPrompt();
+        memory.put("systemPrompt", AgentProtocol.systemPrompt(false)
+                + (invariantPrompt.isEmpty() ? "" : "\n" + invariantPrompt));
+        memory.set("invariants", store.invariants(false));
+        memory.set("invariantHistory", store.invariantHistory(50));
+        memory.put("invariantRevision", store.invariantRevision());
         memory.set("longTerm", store.agentConfig());
         memory.set("ruleCandidates", MAPPER.createArrayNode());
         memory.set("working", MAPPER.createObjectNode());

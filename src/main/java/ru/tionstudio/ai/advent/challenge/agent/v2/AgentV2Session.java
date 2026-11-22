@@ -196,7 +196,12 @@ public class AgentV2Session {
     /** Complete inspector snapshot: all three layers plus the latest token estimate. */
     public ObjectNode memorySnapshot() {
         ObjectNode root = MAPPER.createObjectNode();
-        root.put("systemPrompt", AgentProtocol.systemPrompt(toolsEnabled));
+        String invariantPrompt = dialogStore.invariantPrompt();
+        root.put("systemPrompt", AgentProtocol.systemPrompt(toolsEnabled)
+                + (invariantPrompt.isEmpty() ? "" : "\n" + invariantPrompt));
+        root.set("invariants", dialogStore.invariants(false));
+        root.set("invariantHistory", dialogStore.invariantHistory(50));
+        root.put("invariantRevision", dialogStore.invariantRevision());
         root.set("longTerm", dialogStore.dialogAgentConfig(id));
         root.put("profileId", dialogStore.dialogProfileId(id));
         root.put("historyEmpty", dialogStore.loadEntries(id, "history").isEmpty());
@@ -496,11 +501,14 @@ public class AgentV2Session {
         String selectedChoice = taskState.path("lastChoice").path("selectedId").asText("")
                 .toLowerCase(java.util.Locale.ROOT);
         userSkipAuthorized = selectedChoice.contains("demo") || normalizedReply.matches(".*демо.*");
+        taskState.put("invariantRevision", dialogStore.invariantRevision());
+        dialogStore.saveTaskState(id, taskState);
 
         int consecutiveToolCalls = 0;
         int totalToolCalls = 0;
         int brokenReplies = 0; // consecutive unparseable tool-call attempts
         int validationAttempts = 0;
+        int invariantAttempts = 0;
         int totalPrompt = 0, totalCompletion = 0, llmCalls = 0;
         int lastCallCompletion = -1; // completion tokens of the latest LLM call
         boolean hasUsage = false;
@@ -565,7 +573,7 @@ public class AgentV2Session {
                 listener.on("planning", MAPPER.createObjectNode());
                 LlmClient.ChatResult planResult = callLlm(
                         List.of(new LlmClient.Message("user",
-                                AgentProtocol.planningPrompt(userMessage))),
+                                AgentProtocol.planningPrompt(userMessage, dialogStore.invariantPrompt()))),
                         listener, false, "planning");
                 if (planResult == null) {
                     if (aborted) {
@@ -783,9 +791,11 @@ public class AgentV2Session {
                                     + ": reply truncated by token limit, dangling JSON tail removed ("
                                     + (reply.length() - cleaned.length()) + " chars)");
                             finalReply = cleaned;
-                            ObjectNode replace = MAPPER.createObjectNode();
-                            replace.put("text", finalReply);
-                            listener.on("reply", replace);
+                            if (dialogStore.invariants(true).isEmpty()) {
+                                ObjectNode replace = MAPPER.createObjectNode();
+                                replace.put("text", finalReply);
+                                listener.on("reply", replace);
+                            }
                         }
                         String noteText = "Ответ обрезан: модель упёрлась в лимит токенов"
                                 + " (контекстное окно заполнено). Включите сжатие контекста"
@@ -812,6 +822,51 @@ public class AgentV2Session {
                         emitHistory("assistant", finalReply);
                         emitHistory("tool", feedback);
                         continue;
+                    }
+                    ObjectNode invariantCheck = checkInvariants(finalReply, listener);
+                    if (!invariantCheck.path("violations").isMissingNode()) {
+                        dialogStore.logAction(id, invariantCheck.path("allowed").asBoolean(false)
+                                        ? "invariant_check_passed" : "invariant_check_blocked",
+                                invariantCheck.toString());
+                    }
+                    if (invariantCheck.has("promptTokens") || invariantCheck.has("completionTokens")) {
+                        llmCalls++;
+                        if (invariantCheck.path("promptTokens").isInt()) {
+                            totalPrompt += invariantCheck.path("promptTokens").asInt();
+                            lastPromptTokens = invariantCheck.path("promptTokens").asInt();
+                            hasUsage = true;
+                        }
+                        if (invariantCheck.path("completionTokens").isInt()) {
+                            totalCompletion += invariantCheck.path("completionTokens").asInt();
+                            hasUsage = true;
+                        }
+                    }
+                    if (!invariantCheck.path("allowed").asBoolean(false)) {
+                        invariantAttempts++;
+                        String feedback = "[нарушение инвариантов]: Ответ заблокирован кодом. "
+                                + invariantCheck.path("violations").toString()
+                                + " Исправь решение или откажись от нарушающего предложения. Не изменяй инварианты.";
+                        history.add(new Entry("assistant", finalReply));
+                        history.add(new Entry("tool", feedback));
+                        emitHistory("assistant", finalReply);
+                        emitHistory("tool", feedback);
+                        ObjectNode note = MAPPER.createObjectNode();
+                        note.put("text", "Ответ заблокирован: нарушение инвариантов. "
+                                + invariantCheck.path("violations").toString());
+                        listener.on("note", note);
+                        emitTranscript("note", note);
+                        if (invariantAttempts < 2 && !aborted) continue;
+                        String refusal = "Не могу выдать решение: оно нарушает действующие инварианты. "
+                                + "Измените инвариант явно в редакторе или измените задачу.";
+                        ObjectNode refusalEvent = MAPPER.createObjectNode();
+                        refusalEvent.put("text", refusal);
+                        listener.on("reply", refusalEvent);
+                        history.add(new Entry("assistant", refusal));
+                        emitHistory("assistant", refusal);
+                        emitTranscriptText("assistant", refusal);
+                        emitDone(listener, totalPrompt, totalCompletion, hasUsage,
+                                llmCalls, totalToolCalls, false, lastCallCompletion);
+                        return;
                     }
                     // A textual reply is a completion candidate, not an automatic done.
                     MemoryStore.TransitionResult validating = dialogStore.transitionTask(
@@ -861,6 +916,11 @@ public class AgentV2Session {
                         listener.on("note", note);
                         emitTranscript("note", note);
                         continue;
+                    }
+                    if (!dialogStore.invariants(true).isEmpty()) {
+                        ObjectNode approvedReply = MAPPER.createObjectNode();
+                        approvedReply.put("text", finalReply);
+                        listener.on("reply", approvedReply);
                     }
                     history.add(new Entry("assistant", finalReply));
                     emitHistory("assistant", finalReply);
@@ -1028,14 +1088,15 @@ public class AgentV2Session {
         String prompt = """
                 Проверь кандидат ответа ассистента. Ответь СТРОГО JSON без markdown:
                 {"passed": true|false, "feedback": "краткая причина или пустая строка"}
-                passed=true только если ответ решает задачу, не противоречит плану и не содержит явных ошибок.
+                passed=true только если ответ решает задачу, не противоречит плану и инвариантам и не содержит явных ошибок.
                 Не требуй необязательных дополнений.
 
                 Задача: %s
                 План: %s
+                Инварианты: %s
                 Ожидаемый результат: %s
                 Кандидат ответа: %s
-                """.formatted(userMessage, state.path("plan").toString(),
+                """.formatted(userMessage, state.path("plan").toString(), dialogStore.invariants(true).toString(),
                 state.path("expected").asText(""), answer);
         ObjectNode result = MAPPER.createObjectNode();
         LlmClient.ChatResult checked = callLlm(List.of(new LlmClient.Message("user", prompt)),
@@ -1060,6 +1121,55 @@ public class AgentV2Session {
         } catch (Exception e) {
             result.put("passed", false);
             result.put("feedback", "Валидатор вернул некорректный JSON.");
+        }
+        return result;
+    }
+
+    /** Code gate: deterministic checks first, then a semantic verdict that Java can reject. */
+    private ObjectNode checkInvariants(String answer, Listener listener) throws IOException {
+        ArrayNode active = dialogStore.invariants(true);
+        ObjectNode deterministic = InvariantGuard.checkDeterministic(active, answer, "answer", "");
+        if (!deterministic.path("allowed").asBoolean(false) || active.isEmpty()) return deterministic;
+        ArrayNode semantic = MAPPER.createArrayNode();
+        for (JsonNode invariant : active) {
+            if (!"deterministic".equals(invariant.path("checkType").asText("semantic"))) semantic.add(invariant);
+        }
+        if (semantic.isEmpty()) return deterministic;
+        ObjectNode state = dialogStore.taskState(id);
+        String prompt = """
+                Проверь кандидат ответа на нарушение каждого инварианта. Ответь СТРОГО JSON без markdown:
+                {"allowed":true|false,"violations":[{"invariantId":"id","evidence":"точный фрагмент или причина"}]}
+                allowed=false при любом явном нарушении. Не придумывай нарушений. Проверяй только перечисленные инварианты.
+                Инварианты: %s
+                План: %s
+                Кандидат ответа: %s
+                """.formatted(semantic.toString(), state == null ? "{}" : state.path("plan").toString(), answer);
+        ObjectNode result = MAPPER.createObjectNode();
+        result.put("allowed", false);
+        result.putArray("violations");
+        LlmClient.ChatResult checked = callLlm(List.of(new LlmClient.Message("user", prompt)),
+                listener, false, "invariant_check");
+        if (checked == null) {
+            result.put("feedback", "Проверка инвариантов не выполнена; ответ заблокирован.");
+            return result;
+        }
+        if (checked.promptTokens() != null) result.put("promptTokens", checked.promptTokens());
+        if (checked.completionTokens() != null) result.put("completionTokens", checked.completionTokens());
+        try {
+            String raw = checked.reply() == null ? "" : checked.reply().trim();
+            if (raw.startsWith("```")) {
+                raw = raw.replaceFirst("^```(?:json)?\\s*", "");
+                int end = raw.lastIndexOf("```");
+                if (end >= 0) raw = raw.substring(0, end);
+            }
+            JsonNode parsed = MAPPER.readTree(raw.trim());
+            JsonNode violations = parsed.path("violations");
+            result.put("allowed", parsed.path("allowed").asBoolean(false)
+                    && violations.isArray() && violations.isEmpty());
+            if (violations.isArray()) result.set("violations", violations);
+            result.put("feedback", parsed.path("feedback").asText(""));
+        } catch (Exception e) {
+            result.put("feedback", "Проверка инвариантов вернула некорректный JSON; ответ заблокирован.");
         }
         return result;
     }
@@ -1099,9 +1209,11 @@ public class AgentV2Session {
             LlmClient.ChatOptions options = streamTokens
                     ? LlmClient.ChatOptions.defaults()
                     : new LlmClient.ChatOptions("none", "", null, List.of(), "none", null);
+            // With active invariants the final answer is shown only after the code gate.
+            boolean forwardContent = streamTokens && dialogStore.invariants(true).isEmpty();
             result = client.chatStream(messages, options,
                     token -> {
-                        if (!streamTokens) {
+                        if (!forwardContent) {
                             return;
                         }
                         ObjectNode json = MAPPER.createObjectNode();
@@ -1244,6 +1356,19 @@ public class AgentV2Session {
                 "get_system_time", "list_files", "read_file", "calculate")
                 .contains(call.tool()) && !"execution".equals(stage)) {
             return new AgentTools.ToolResult(false, "Инструмент запрещён на этапе " + stage + ".");
+        }
+
+        ObjectNode actionInvariantCheck = InvariantGuard.checkDeterministic(dialogStore.invariants(true),
+                call.args().toString(), call.tool(), call.args().path("name").asText(""));
+        if (!actionInvariantCheck.path("allowed").asBoolean(false)) {
+            dialogStore.logAction(id, "invariant_action_blocked", actionInvariantCheck.toString());
+            ObjectNode note = MAPPER.createObjectNode();
+            note.put("text", "Действие заблокировано инвариантами: "
+                    + actionInvariantCheck.path("violations").toString());
+            listener.on("note", note);
+            emitTranscript("note", note);
+            return new AgentTools.ToolResult(false, "Действие нарушает инварианты: "
+                    + actionInvariantCheck.path("violations").toString());
         }
 
         // Internal progress tool: no files, no permission
@@ -1478,7 +1603,9 @@ public class AgentV2Session {
     private List<LlmClient.Message> buildMessages() {
         List<Entry> window = historyWindow();
         List<LlmClient.Message> messages = new ArrayList<>(window.size() + 4);
-        String system = AgentProtocol.systemPrompt(toolsEnabled);
+        String invariantPrompt = dialogStore.invariantPrompt();
+        String system = AgentProtocol.systemPrompt(toolsEnabled)
+                + (invariantPrompt.isEmpty() ? "" : "\n" + invariantPrompt);
         String longTerm = "[LONG-TERM — конфиг агента, передаётся целиком]\n"
                 + dialogStore.dialogAgentConfig(id).toString();
         ObjectNode working = dialogStore.working(id);

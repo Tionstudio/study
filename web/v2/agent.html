@@ -175,6 +175,16 @@
         .st-title-group { display: flex; align-items: center; gap: 6px; }
         .raw-editor summary { cursor: pointer; color: var(--muted); font-size: 12px; }
         .raw-editor textarea { margin: 8px 0; }
+        .invariants-list { display: flex; flex-direction: column; gap: 7px; max-height: 320px; margin: 8px 0; overflow-y: auto; }
+        .invariant-item { padding: 7px; border: 1px solid var(--line); border-radius: 7px; }
+        .invariant-item textarea { width: 100%; min-height: 54px; margin: 5px 0; resize: vertical; font: 12px/1.4 inherit; }
+        .invariant-item select, .invariant-item input { min-width: 0; padding: 5px; font-size: 11px; }
+        .invariant-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+        .invariant-config { width: 100%; margin-top: 5px; font: 11px var(--code); }
+        .invariant-actions { display: flex; align-items: center; gap: 5px; margin-top: 5px; }
+        .invariant-version { margin-right: auto; color: var(--muted); font-size: 11px; }
+        .invariant-history { max-height: 180px; overflow-y: auto; font-size: 11px; }
+        .invariant-change { padding: 6px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
         .rules-list, .rule-candidates { display: flex; flex-direction: column; max-height: 240px; overflow-y: auto; scrollbar-width: thin; border-top: 1px solid var(--line); }
         .rule-candidates { max-height: none; border-top: 0; }
         .rule, .rule-candidate { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; gap: 6px; align-items: center; min-height: 34px; padding: 4px 2px; border-bottom: 1px solid var(--line); }
@@ -328,6 +338,13 @@
             <details class="memory-section" open><summary>Задача — конечный автомат</summary><div class="memory-body">
                 <dl id="taskState" class="task-grid"><dt>Состояние</dt><dd>Задача ещё не начата</dd></dl>
                 <div id="taskTransitions" class="task-transitions"></div>
+            </div></details>
+
+            <details class="memory-section" open><summary>Invariants — обязательные ограничения</summary><div class="memory-body">
+                <div class="status">Глобальные. Изменяются только здесь, с записью истории.</div>
+                <div id="invariantsList" class="invariants-list"></div>
+                <button id="addInvariant" class="btn small" type="button">＋ Добавить инвариант</button>
+                <details class="invariant-history-wrap"><summary>История изменений</summary><div id="invariantHistory" class="invariant-history"></div></details>
             </div></details>
 
             <details class="memory-section" open><summary>Long-term — конфиг агента</summary><div class="memory-body">
@@ -573,7 +590,7 @@
     }
     function renderLlmCall(log) {
         if (!log || log.kind === 'chat') return null;
-        const labels = {planning:'Планирование', validation:'Валидация результата', extract_st:'Извлечение фактов', sticky_extract:'Извлечение фактов', working_update:'Обновление задачи', summary:'Сжатие диалога', facts_consolidate:'Объединение фактов', lt_candidates:'Поиск предпочтений для LT', lt_bootstrap:'Первичная настройка LT', service:'Служебная операция'};
+        const labels = {planning:'Планирование', validation:'Валидация результата', invariant_check:'Проверка инвариантов', extract_st:'Извлечение фактов', sticky_extract:'Извлечение фактов', working_update:'Обновление задачи', summary:'Сжатие диалога', facts_consolidate:'Объединение фактов', lt_candidates:'Поиск предпочтений для LT', lt_bootstrap:'Первичная настройка LT', service:'Служебная операция'};
         const usage = log.usage || {};
         const title = (labels[log.kind] || 'Служебная операция')
             + (Number.isFinite(log.durationMs) ? ' · ' + (log.durationMs / 1000).toFixed(1) + ' с' : '')
@@ -1005,6 +1022,59 @@
         const profileLocked = Boolean(sessionId) && (memory.historyEmpty === false || (memory.historyMessages || 0) > 0);
         $('profileSelect').disabled = profileLocked;
         $('applyProfile').disabled = profileLocked || !$('profileSelect').value;
+        renderInvariants(memory.invariants || [], memory.invariantHistory || []);
+    }
+    function renderInvariants(invariants, history) {
+        const list = $('invariantsList'); list.innerHTML = '';
+        if (!invariants.length) list.innerHTML = '<span class="status facts-empty">Инвариантов нет.</span>';
+        invariants.forEach(item => {
+            const row = document.createElement('div'); row.className = 'invariant-item';
+            row.innerHTML = '<div class="invariant-meta"><select class="invariant-category" aria-label="Категория">'
+                + [['architecture','Архитектура'],['stack','Стек'],['business','Бизнес-правило'],['decision','Решение'],['constraint','Ограничение']]
+                    .map(([value,label]) => '<option value="' + value + '"' + (item.category === value ? ' selected' : '') + '>' + label + '</option>').join('')
+                + '</select><select class="invariant-check" aria-label="Тип проверки">'
+                + '<option value="semantic"' + (item.checkType !== 'deterministic' ? ' selected' : '') + '>Семантическая</option>'
+                + '<option value="deterministic"' + (item.checkType === 'deterministic' ? ' selected' : '') + '>Кодовая</option></select></div>'
+                + '<textarea class="invariant-text" aria-label="Текст инварианта">' + escapeHtml(item.text || '') + '</textarea>'
+                + '<input class="invariant-config" aria-label="JSON кодовой проверки" title="Для кодовой проверки: forbiddenTerms, allowedFileExtensions, protectedFiles" value="' + escapeHtml(JSON.stringify(item.config || {})) + '">'
+                + '<div class="invariant-actions"><span class="invariant-version">v' + (item.version || 1) + ' · ' + escapeHtml(item.id || 'новый') + '</span>'
+                + '<label><input class="invariant-enabled" type="checkbox"' + (item.enabled !== false ? ' checked' : '') + '> активен</label>'
+                + '<button class="btn small primary save-invariant" type="button">Сохранить</button>'
+                + (item.id ? '<button class="btn small danger delete-invariant" type="button" title="Удалить">×</button>' : '') + '</div>';
+            row.querySelector('.save-invariant').onclick = () => saveInvariantRow(row, item.id || '');
+            const deleteButton = row.querySelector('.delete-invariant');
+            if (deleteButton) deleteButton.onclick = () => deleteInvariant(item.id);
+            list.appendChild(row);
+        });
+        $('invariantHistory').innerHTML = history.length ? history.map(change => {
+            const before = change.oldValue?.text || '—';
+            const after = change.newValue?.text || 'удалён';
+            return '<div class="invariant-change"><strong>' + escapeHtml(change.invariantId) + '</strong> · '
+                + escapeHtml(change.createdAt || '') + '<br>' + escapeHtml(before) + ' → ' + escapeHtml(after) + '</div>';
+        }).join('') : '<div class="status">Изменений пока нет.</div>';
+    }
+    async function saveInvariantRow(row, id) {
+        try {
+            const config = JSON.parse(row.querySelector('.invariant-config').value || '{}');
+            if (!config || Array.isArray(config) || typeof config !== 'object') throw new Error('config должен быть JSON-объектом.');
+            const body = {id, category:row.querySelector('.invariant-category').value,
+                text:row.querySelector('.invariant-text').value.trim(), checkType:row.querySelector('.invariant-check').value,
+                config, enabled:row.querySelector('.invariant-enabled').checked, dialogId:sessionId || ''};
+            if (!body.text) throw new Error('Введите текст инварианта.');
+            const response = await fetch('/api/v2/agent/invariants', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+            const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Ошибка сохранения');
+            Object.assign(currentMemory, data); renderInvariants(data.invariants || [], data.invariantHistory || []);
+            setStatus('Инвариант сохранён; изменение записано в историю.');
+        } catch (error) { setStatus(error.message, true); }
+    }
+    async function deleteInvariant(id) {
+        if (!confirm('Удалить инвариант ' + id + '? Удаление будет записано в историю.')) return;
+        try {
+            const response = await fetch('/api/v2/agent/invariants?id=' + encodeURIComponent(id) + '&dialog=' + encodeURIComponent(sessionId || ''), {method:'DELETE'});
+            const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Ошибка удаления');
+            Object.assign(currentMemory, data); renderInvariants(data.invariants || [], data.invariantHistory || []);
+            setStatus('Инвариант удалён.');
+        } catch (error) { setStatus(error.message, true); }
     }
     function factsFromEditor() {
         return ($('factsList')._facts || []).map(f => ({...f}));
@@ -1508,6 +1578,12 @@
         if (!confirm('Сбросить ST/WT и LT всех диалогов? Транскрипты, журналы и профили сохранятся.')) return;
         const response = await fetch('/api/v2/agent/reset', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({confirm:true})});
         if (response.ok) { await refreshMemory(); setStatus('Все слои памяти очищены.'); } else setStatus(await response.text(), true);
+    };
+    $('addInvariant').onclick = () => {
+        const items = [...(currentMemory.invariants || []), {category:'constraint', checkType:'semantic', text:'', config:{}, enabled:true, version:0}];
+        renderInvariants(items, currentMemory.invariantHistory || []);
+        const rows = $('invariantsList').querySelectorAll('.invariant-item');
+        rows[rows.length - 1]?.querySelector('.invariant-text').focus();
     };
     $('addFact').onclick = () => {
         if ($('factsList').querySelector('.fact-row.editing')) { setStatus('Сначала завершите редактирование текущего факта.', true); return; }
